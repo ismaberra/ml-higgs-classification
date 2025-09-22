@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Data files (we don't push raw CSVs)
+dataset/*.csv
+
+# OS-specific junk
+.DS_Store

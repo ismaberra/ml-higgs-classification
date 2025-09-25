@@ -9,6 +9,7 @@ import numpy as np
 
 """Utility helpers (internal)."""
 
+
 def _ensure_1d_vector(w: np.ndarray) -> np.ndarray:
     """Ensure weight vector is 1D shaped (D,)."""
     if w.ndim == 2 and (w.shape[1] == 1 or w.shape[0] == 1):
@@ -18,11 +19,11 @@ def _ensure_1d_vector(w: np.ndarray) -> np.ndarray:
     return w
 
 
-def _compute_mse_loss(y: np.ndarray, tx: np.ndarray, w: np.ndarray) -> float:
-    """MSE with factor 1/(2N)."""
+def _compute_mse_loss(y: np.ndarray, tx: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """MSE with factor 1/(2N). Returns a 0-D NumPy array (shape ())."""
     e = y - tx @ w
     n = y.shape[0]
-    return float((e @ e) / (2.0 * n))
+    return np.array((e @ e) / (2.0 * n), dtype=np.float64)
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -36,32 +37,36 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return out
 
 
-def _logistic_loss(y: np.ndarray, tx: np.ndarray, w: np.ndarray) -> float:
-    """Data loss for logistic regression: sum of negative log-likelihood."""
+def _logistic_loss(y: np.ndarray, tx: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Data loss for logistic regression: average negative log-likelihood."""
     z = tx @ w
     # Use softplus for numerical stability: log(1 + exp(z)).
     abs_z = np.abs(z)
     softplus = np.maximum(0.0, z) + np.log1p(np.exp(-abs_z))
-    nll = np.sum(softplus - y * z)
-    return float(nll)
+    n = y.shape[0]
+    nll = np.sum(softplus - y * z) / n
+    return np.array(nll, dtype=np.float64)
 
 
 def _logistic_gradient(y: np.ndarray, tx: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Gradient of the logistic data loss (unregularized)."""
+    """Gradient of the logistic data loss averaged over N samples."""
     p = _sigmoid(tx @ w)
-    return tx.T @ (p - y)
+    n = y.shape[0]
+    return (tx.T @ (p - y)) / n
 
 
 def _minibatch_iterator(
     y: np.ndarray, tx: np.ndarray, batch_size: int = 1
 ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
-    """ Initialize mini-batches of size `batch_size` (default 1 for the project)."""
+    """Initialize mini-batches of size `batch_size` (default 1 for the project)."""
     n = y.shape[0]
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
         yield y[start:end], tx[start:end]
 
+
 """Table 1: algorithms implemented."""
+
 
 def mean_squared_error_gd(
     y: np.ndarray,
@@ -83,6 +88,7 @@ def mean_squared_error_gd(
 
     loss = _compute_mse_loss(y, tx, w)
     return w, loss
+
 
 def mean_squared_error_sgd(
     y: np.ndarray,
@@ -112,6 +118,7 @@ def mean_squared_error_sgd(
     loss = _compute_mse_loss(y, tx, w)
     return w, loss
 
+
 def least_squares(y: np.ndarray, tx: np.ndarray) -> Tuple[np.ndarray, float]:
     """Least squares via normal equations. Falls back to pinv if matrix is singular."""
     y = np.asarray(y, dtype=np.float64).reshape(-1)
@@ -126,6 +133,7 @@ def least_squares(y: np.ndarray, tx: np.ndarray) -> Tuple[np.ndarray, float]:
 
     loss = _compute_mse_loss(y, tx, w)
     return _ensure_1d_vector(w), loss
+
 
 def ridge_regression(
     y: np.ndarray, tx: np.ndarray, lambda_: float
@@ -147,6 +155,7 @@ def ridge_regression(
     loss = _compute_mse_loss(y, tx, w)
     return _ensure_1d_vector(w), loss
 
+
 def logistic_regression(
     y: np.ndarray,
     tx: np.ndarray,
@@ -165,6 +174,7 @@ def logistic_regression(
 
     loss = _logistic_loss(y, tx, w)
     return w, loss
+
 
 def reg_logistic_regression(
     y: np.ndarray,

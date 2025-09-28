@@ -13,6 +13,12 @@ Missingness categories:
 
 y_train unbalanced : use duplication to balance
 
+---- y_train
+
+- Can either use random oversampling (sample rows with replacement of the neg class) until reach a balanche of choise (30/70 for ex)
+
+- Or use class weights for some functions : logit and reg logit
+
 6 constant features to drop : [9, 11, 12, 18, 19, 22]
 2 near constant features to drop : [280, 281]
 

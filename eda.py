@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def dataset_overview(x, y):
@@ -198,3 +199,38 @@ def find_highly_correlated(corr_matrix, threshold=0.95):
             if abs(corr_matrix[i, j]) > threshold:
                 pairs.append((i, j, corr_matrix[i, j]))
     return pairs
+
+
+def compare_y_distribution_from_report(x, y, report, feature_ids_idx, label):
+    """
+    Compares the distribution of y between clean and outlier individuals
+    for a given list of features (numeric or continuous).
+    """
+    # Building an outlier mask
+    outlier_mask = np.zeros(x.shape[0], dtype=bool)
+    for f, _, _, q01, q99 in report:
+        values = x[:, f]
+        outlier_mask |= (values < q01) | (values > q99)
+
+    clean_idx = ~outlier_mask
+    outlier_idx = outlier_mask
+
+    print(f"\n[{label}] Individuals without outlier: {clean_idx.sum()}, with outlier: {outlier_idx.sum()}")
+
+    # Prepare data for seaborn
+    y_clean = y[clean_idx]
+    y_outlier = y[outlier_idx]
+    data = {
+        "y": np.concatenate([y_clean, y_outlier]),
+        "group": [f"{label}-clean"] * len(y_clean) + [f"{label}-outlier"] * len(y_outlier)
+    }
+
+    # Plot
+    plt.figure(figsize=(8,5))
+    sns.countplot(x="y", hue="group", data=data, palette="Set1")
+    plt.title(f"Distribution of y for {label} features")
+    plt.xlabel("Class label (y)")
+    plt.ylabel("Number of samples")
+    plt.legend(title="Group")
+    plt.show()
+

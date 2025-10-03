@@ -1,0 +1,15 @@
+[
+  {
+    "params": {},
+    "metrics": {
+      "acc": 0.9116979292059672,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "roc_auc": 0.5018763362692978,
+      "pr_auc": 0.08889307284100795,
+      "log_loss": NaN,
+      "threshold": -Infinity
+    }
+  }
+]

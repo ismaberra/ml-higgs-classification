@@ -31,3 +31,13 @@ Features 7,8 are the same : drop one.
 Only 6 continuous : [7, 8, 222, 226, 229, 253]
 
 Features 222 and 229 are highly correlated but not enough to drop one for now. Could try to explore interaction?
+
+# Conclusions from run.py on RAW dataset 
+
+The models on raw features default to predicting the majority class, so they almost never flag positives.
+F1 (harmonic mean of precision and recall) ≈ 0 shows that, at any chosen threshold, either precision or recall collapses—i.e., the classifier is not retrieving positives usefully.
+ROC curve (TPR vs FPR) with ROC-AUC ≈ 0.50 indicates the model’s scores rank positives no better than random across all thresholds.
+PR curve (precision vs recall) with PR-AUC ≈ base positive rate (~0.089) confirms near-random behavior in the highly imbalanced regime, where PR is the more informative curve.
+High accuracy (~0.91) is misleading: it just reflects class imbalance, not true detection.
+Different λ/γ give the same degenerate outcome because unprocessed scaling/missingness and imbalance prevent learning meaningful decision boundaries.
+Net: Without preprocessing and imbalance handling, both thresholded performance (F1) and ranking ability (ROC/PR curves) show no signal.

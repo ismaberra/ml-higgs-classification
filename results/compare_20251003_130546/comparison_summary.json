@@ -1,0 +1,171 @@
+{
+  "models": [
+    "least_squares",
+    "ridge",
+    "logistic",
+    "reg_logistic",
+    "mse_gd",
+    "mse_sgd"
+  ],
+  "use_preprocessed": false,
+  "oversample": null,
+  "k_folds": 5,
+  "seed": 1,
+  "n_train": 328135,
+  "n_features": 321,
+  "details": {
+    "least_squares": {
+      "best_params": {},
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": -Infinity
+      },
+      "threshold": -Infinity,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    },
+    "ridge": {
+      "best_params": {
+        "lambda": 0.0001
+      },
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": -Infinity
+      },
+      "threshold": -Infinity,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    },
+    "logistic": {
+      "best_params": {
+        "gamma": 0.1,
+        "max_iters": 2000
+      },
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": 0.0
+      },
+      "threshold": 0.0,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    },
+    "reg_logistic": {
+      "best_params": {
+        "lambda": 0.0001,
+        "gamma": 0.1,
+        "max_iters": 2000
+      },
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": 0.0
+      },
+      "threshold": 0.0,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    },
+    "mse_gd": {
+      "best_params": {
+        "gamma": 0.1,
+        "max_iters": 2000
+      },
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": -Infinity
+      },
+      "threshold": -Infinity,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    },
+    "mse_sgd": {
+      "best_params": {
+        "gamma": 0.1,
+        "max_iters": 2000
+      },
+      "cv_best_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "roc_auc": 0.50188,
+        "pr_auc": 0.08889,
+        "log_loss": NaN,
+        "threshold": -Infinity
+      },
+      "threshold": -Infinity,
+      "final_train_metrics": {
+        "acc": 0.9117,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "log_loss": NaN,
+        "roc_auc": 0.50253,
+        "pr_auc": 0.08922
+      }
+    }
+  }
+}

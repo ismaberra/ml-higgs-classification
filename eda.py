@@ -158,6 +158,7 @@ def plot_feature_distribution(x, feat_idx, bins=30):
     plt.ylabel("Frequency")
     plt.show()
 
+"""
 def detect_feature_types(x, threshold=20):
     categorical, continuous = [], []
     for j in range(x.shape[1]):
@@ -167,6 +168,57 @@ def detect_feature_types(x, threshold=20):
         else:
             continuous.append(j)
     return categorical, continuous
+"""
+
+def detect_feature_types(x, threshold=20, binary_tolerance=0.95):
+    """
+    Detect categorical, continuous, and binary features.
+    - categorical: few unique values (<= threshold) or very rare values (<1%)
+    - binary: exactly 2 unique values (0 and 1)
+    - continuous: many unique values
+    """
+    categorical, continuous, binary = [], [], []
+    
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        unique_vals, counts = np.unique(col[~np.isnan(col)], return_counts=True)
+        n_unique = len(unique_vals)
+        
+        # Proportion of 0/1 values
+        mask_binary = np.isin(unique_vals, [0, 1])
+        ratio_binary = counts[mask_binary].sum() / counts.sum()
+        
+        if ratio_binary >= binary_tolerance:
+            binary.append(j)
+        elif n_unique <= threshold or n_unique / len(x) < 0.01:
+            categorical.append(j)
+        else:
+            continuous.append(j)
+    
+    return categorical, continuous, binary
+    """{
+        "categorical": categorical,
+        "continuous": continuous,
+        "binary": binary
+    }"""
+
+
+def detect_dependencies(x, parent_idx, candidate_idxs, threshold=0.95):
+    """
+    Detect child features that depend on a parent feature.
+    threshold = % of missing children when parent=0
+    """
+    parent = x[:, parent_idx]
+    dependent = []
+    for j in candidate_idxs:
+        child = x[:, j]
+        missing_when_parent0 = np.isnan(child[parent == 0]).mean()
+        if missing_when_parent0 > threshold:
+            dependent.append(j)
+    return dependent
+
+    
+
 
 def compute_feature_correlation(x, features_idx):
     """
@@ -234,3 +286,49 @@ def compare_y_distribution_from_report(x, y, report, feature_ids_idx, label):
     plt.legend(title="Group")
     plt.show()
 
+# Standardization (z-score)
+def standardize(x_train, x_test):
+    """
+    Standardize features: mean=0, std=1.
+    Important: use train statistics for both train and test.
+    """
+    mean = np.mean(x_train, axis=0)
+    std = np.std(x_train, axis=0)
+    std[std == 0] = 1  # avoid division by zero
+    
+    x_train_std = (x_train - mean) / std
+    x_test_std = (x_test - mean) / std
+    
+    return x_train_std, x_test_std
+
+
+
+def find_suspicious_features(x_train, y_train, corr_threshold=0.3):
+    """
+    Identify suspicious features that may act as data leaks or non-informative features.
+    Criteria:
+    - High absolute correlation with y (above corr_threshold).
+    - Very large numeric ranges that may indicate dates or IDs.
+    """
+    n_features = x_train.shape[1]
+    suspicious = []
+
+    for j in range(n_features):
+        col = x_train[:, j]
+
+        # Compute correlation (skip if constant)
+        if np.std(col) == 0:
+            continue
+        corr = np.corrcoef(col, y_train)[0, 1]
+
+        # Range check
+        col_min, col_max = np.min(col), np.max(col)
+        value_range = col_max - col_min
+
+        # Flag suspicious features
+        if abs(corr) > corr_threshold:
+            suspicious.append((j, "High correlation", corr))
+        elif value_range > 1e6:  # arbitrary threshold, e.g. dates
+            suspicious.append((j, "Large range (maybe date/ID)", value_range))
+
+    return suspicious

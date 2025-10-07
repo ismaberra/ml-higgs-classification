@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import itertools as combinations
 
 
 def dataset_overview(x, y):
@@ -170,52 +171,271 @@ def detect_feature_types(x, threshold=20):
     return categorical, continuous
 """
 
-def detect_feature_types(x, threshold=20, binary_tolerance=0.95):
+import numpy as np
+
+def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
     """
-    Detect categorical, continuous, and binary features.
-    - categorical: few unique values (<= threshold) or very rare values (<1%)
-    - binary: exactly 2 unique values (0 and 1)
-    - continuous: many unique values
+    Detect feature types (categorical, continuous, binary) in survey-style datasets.
+
+    Rules:
+    - binary: exactly two unique values (e.g., [0,1] or [1,2]) or one unique + many NaNs.
+    - categorical: small integer-coded ranges (e.g., 1–5, 1–9, 0–10), representing discrete choices.
+    - continuous: many unique values or large numerical range, possibly with decimals.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        2D array of shape (n_samples, n_features) containing the dataset.
+    threshold_cat : int
+        Maximum number of unique values for a feature to be considered categorical.
+    nan_ratio_limit : float
+        If more than this ratio of NaNs, the feature is ignored.
+
+    Returns
+    -------
+    categorical, continuous, binary : list[int]
+        Lists of feature indices for each detected type.
     """
+
     categorical, continuous, binary = [], [], []
-    
-    for j in range(x.shape[1]):
+    n_features = x.shape[1]
+
+    for j in range(n_features):
         col = x[:, j]
-        unique_vals, counts = np.unique(col[~np.isnan(col)], return_counts=True)
-        n_unique = len(unique_vals)
-        
-        # Proportion of 0/1 values
-        mask_binary = np.isin(unique_vals, [0, 1])
-        ratio_binary = counts[mask_binary].sum() / counts.sum()
-        
-        if ratio_binary >= binary_tolerance:
+        col_nonan = col[~np.isnan(col)]
+        n_unique = len(np.unique(col_nonan))
+        nan_ratio = np.isnan(col).mean()
+
+        # Skip features that are almost entirely missing
+        if n_unique == 0 or nan_ratio > nan_ratio_limit:
+            continue
+
+        unique_vals = np.unique(col_nonan)
+        max_val, min_val = np.max(unique_vals), np.min(unique_vals)
+
+        # 1️⃣ True binary (exactly 2 values, e.g. [0,1], [1,2])
+        if n_unique == 2:
             binary.append(j)
-        elif n_unique <= threshold or n_unique / len(x) < 0.01:
+            continue
+
+        # 2️⃣ Pseudo-binary (only one value + many NaN)
+        if n_unique == 1 and nan_ratio > 0.2:
+            binary.append(j)
+            continue
+
+        # 3️⃣ Categorical: few unique integer values (1–15), small range
+        if (
+            np.all(col_nonan % 1 == 0) and          # integer-coded
+            n_unique <= threshold_cat and           # few unique
+            max_val <= 20 and                       # small range
+            (max_val - min_val) <= 20               # tightly grouped
+        ):
             categorical.append(j)
-        else:
+            continue
+
+        # 4️⃣ Continuous: large value diversity, wide range, or decimals
+        if (
+            n_unique > threshold_cat or
+            max_val > 20 or
+            not np.all(col_nonan % 1 == 0)
+        ):
             continuous.append(j)
-    
+            continue
+
+        # 5️⃣ Default fallback (should rarely happen)
+        categorical.append(j)
+
     return categorical, continuous, binary
-    """{
-        "categorical": categorical,
-        "continuous": continuous,
-        "binary": binary
-    }"""
 
 
-def detect_dependencies(x, parent_idx, candidate_idxs, threshold=0.95):
+
+
+
+def is_survey_code(val):
+        """Check if the number is made only of digits {7,0} or {9,0}."""
+        s = str(int(abs(val)))  # remove sign, convert to string
+        return all(ch in "70" for ch in s) or all(ch in "90" for ch in s)
+    
+def replace_survey_codes_by_pattern(x, feature_names=None, gap_ratio=2.0):
     """
-    Detect child features that depend on a parent feature.
-    threshold = % of missing children when parent=0
+    Detect and replace 'survey missing codes' such as 7, 9, 77, 99, 700, 900, etc.
+    based on numeric isolation (large gap or variance) AND digit composition ({7,0} or {9,0}).
+
+    Parameters
+    ----------
+    x : np.ndarray
+        2D array of shape (n_samples, n_features).
+    feature_names : list[str] or None
+        Optional feature names used for printing.
+    gap_ratio : float
+        Threshold ratio for detecting a large jump compared to the mean previous gap.
+        Example: 2.0 means “the last gap must be at least twice larger than the mean of the others”.
+
+    Returns
+    -------
+    x_clean : np.ndarray
+        Copy of the input array with detected survey codes replaced by NaN.
     """
+
+    x_clean = np.copy(x)
+    n_features = x.shape[1]
+
+    for j in range(n_features):
+        col = x_clean[:, j]
+        col_nonan = col[~np.isnan(col)]
+        if col_nonan.size < 4:  # too few values to analyze
+            continue
+
+        unique_vals = np.unique(col_nonan)
+        if unique_vals.size < 4:
+            continue
+
+        diffs = np.diff(unique_vals)
+        mean_gap = np.mean(diffs[:-2]) if diffs.size > 2 else np.mean(diffs)
+        last_gap = diffs[-1]
+        second_last_gap = diffs[-2] if diffs.size >= 2 else 0.0
+
+        # Detect if last or last two values are structurally far
+        isolated_two = last_gap >= gap_ratio * mean_gap and second_last_gap >= gap_ratio * mean_gap
+        isolated_one = last_gap >= gap_ratio * mean_gap
+
+        # Last two values in sorted unique list
+        last_val = unique_vals[-1]
+        prev_val = unique_vals[-2]
+
+        # Check pattern condition
+        last_two_are_codes = is_survey_code(last_val) and is_survey_code(prev_val)
+        last_one_is_code = is_survey_code(last_val)
+
+        replaced = False
+        name = feature_names[j] if feature_names is not None else f"col_{j}"
+
+        # Case 1: both last values look like survey codes
+        if isolated_two and last_two_are_codes:
+            mask = np.isin(col, [prev_val, last_val])
+            col[mask] = np.nan
+            replaced = True
+            print(f"[{name}] → replaced values {prev_val}, {last_val} (2-code block) with NaN")
+
+        # Case 2: only last value is a survey code
+        elif isolated_one and last_one_is_code:
+            mask = col == last_val
+            col[mask] = np.nan
+            replaced = True
+            print(f"[{name}] → replaced value {last_val} (single code) with NaN")
+
+        if replaced:
+            x_clean[:, j] = col
+
+    return x_clean
+
+
+
+
+def detect_dependencies(x, parent_idx, candidate_idxs, threshold=0.95, treat_nan_as_zero=True):
+    """
+    Detect features that are likely dependent on a parent feature.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        The feature matrix.
+    parent_idx : int
+        Index of the potential parent feature.
+    candidate_idxs : list or range
+        Indices of features to test as potential children.
+    threshold : float, optional
+        Minimum proportion of missing values among child features when parent=0.
+        Default is 0.95 (95% missing = strong dependency).
+    treat_nan_as_zero : bool, optional
+        If True, treat NaN values in the parent as equivalent to parent=0 (non-applicable).
+
+    Returns
+    -------
+    dependent : list
+        List of indices of features likely dependent on the parent feature.
+    """
+
     parent = x[:, parent_idx]
     dependent = []
+
+    # Build mask for parent == 0
+    if treat_nan_as_zero:
+        mask_parent0 = np.isnan(parent) | (parent == 0)
+    else:
+        mask_parent0 = (parent == 0)
+
+    # Handle edge case: no examples where parent == 0
+    if np.sum(mask_parent0) == 0:
+        print(f"⚠️ No examples where parent {parent_idx} == 0 — skipping dependency test.")
+        return []
+
     for j in candidate_idxs:
+        if j == parent_idx:
+            continue  # skip self
         child = x[:, j]
-        missing_when_parent0 = np.isnan(child[parent == 0]).mean()
+
+        # Skip if all values are NaN
+        if np.all(np.isnan(child)):
+            continue
+
+        # Compute ratio of missing children where parent=0
+        missing_when_parent0 = np.isnan(child[mask_parent0]).mean()
+
         if missing_when_parent0 > threshold:
             dependent.append(j)
+
     return dependent
+
+
+
+def detect_date_or_id_features(x, feature_names=None):
+    suspect_indices = []
+    n_samples = x.shape[0]
+
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        col_nonan = col[~np.isnan(col)]
+        if len(col_nonan) == 0:
+            continue
+
+        n_unique = len(np.unique(col_nonan))
+        min_val, max_val = np.min(col_nonan), np.max(col_nonan)
+        std_val = np.std(col_nonan)
+        ratio_unique = n_unique / n_samples
+
+        # 1️⃣ Probable années
+        if 1900 <= min_val <= 2100 and max_val <= 2100:
+            suspect_indices.append(j)
+            continue
+
+        # 2️⃣ Probable jours/mois
+        if (
+            1 <= min_val <= 31
+            and n_unique <= 31
+            and std_val < 10
+            and ratio_unique < 0.05
+            and np.median(col_nonan) <= 12  # typique pour des mois
+        ):
+            suspect_indices.append(j)
+            continue
+
+        # 3️⃣ Probable IDs / dates concaténées
+        if (
+            np.all(col_nonan % 1 == 0)
+            and max_val > 9999
+            and (ratio_unique < 0.1 or n_unique < 0.1 * n_samples)
+        ):
+            suspect_indices.append(j)
+            continue
+
+    if feature_names is not None:
+        return [(j, feature_names[j]) for j in suspect_indices]
+    return suspect_indices
+
+
+
+
 
     
 

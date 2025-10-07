@@ -213,17 +213,17 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
         unique_vals = np.unique(col_nonan)
         max_val, min_val = np.max(unique_vals), np.min(unique_vals)
 
-        # 1️⃣ True binary (exactly 2 values, e.g. [0,1], [1,2])
+        # True binary (exactly 2 values, e.g. [0,1], [1,2])
         if n_unique == 2:
             binary.append(j)
             continue
 
-        # 2️⃣ Pseudo-binary (only one value + many NaN)
+        # Pseudo-binary (only one value + many NaN)
         if n_unique == 1 and nan_ratio > 0.2:
             binary.append(j)
             continue
 
-        # 3️⃣ Categorical: few unique integer values (1–15), small range
+        # Categorical: few unique integer values (1–15), small range
         if (
             np.all(col_nonan % 1 == 0) and          # integer-coded
             n_unique <= threshold_cat and           # few unique
@@ -233,7 +233,7 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
             categorical.append(j)
             continue
 
-        # 4️⃣ Continuous: large value diversity, wide range, or decimals
+        # Continuous: large value diversity, wide range, or decimals
         if (
             n_unique > threshold_cat or
             max_val > 20 or
@@ -242,7 +242,7 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
             continuous.append(j)
             continue
 
-        # 5️⃣ Default fallback (should rarely happen)
+        # Default fallback (should rarely happen)
         categorical.append(j)
 
     return categorical, continuous, binary
@@ -520,6 +520,73 @@ def standardize(x_train, x_test):
     x_test_std = (x_test - mean) / std
     
     return x_train_std, x_test_std
+
+
+
+def one_hot_encode_numpy(x, feature_names=None, max_categories=30):
+    """
+    One-Hot Encode categorical features using pure NumPy.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        2D array (n_samples, n_features) containing categorical features.
+    feature_names : list[str] or None
+        Optional list of feature names for labeling the encoded columns.
+    max_categories : int
+        Maximum number of unique values to encode per feature.
+        Features exceeding this limit are skipped (to prevent explosion of dimensions).
+
+    Returns
+    -------
+    x_encoded : np.ndarray
+        Encoded matrix with 0/1 values.
+    new_feature_names : list[str]
+        Names of the new encoded columns.
+    skipped_features : list[int]
+        Indices of features that were skipped due to too many categories.
+    """
+
+    n_samples, n_features = x.shape
+    encoded_blocks = []
+    new_feature_names = []
+    skipped_features = []
+
+    for j in range(n_features):
+        col = x[:, j]
+        col_nonan = col[~np.isnan(col)]
+        unique_vals = np.unique(col_nonan)
+
+        # Skip features that are empty
+        if unique_vals.size == 0:
+            continue
+
+        # Skip overly complex features (too many categories)
+        if unique_vals.size > max_categories:
+            skipped_features.append(j)
+            continue
+
+        # Create the encoded block
+        encoded = np.zeros((n_samples, unique_vals.size))
+        for i, val in enumerate(unique_vals):
+            mask = (col == val)
+            encoded[mask, i] = 1.0
+
+            # Column name format: featureName_value
+            if feature_names is not None:
+                new_feature_names.append(f"{feature_names[j]}={int(val)}")
+            else:
+                new_feature_names.append(f"col{j}={int(val)}")
+
+        encoded_blocks.append(encoded)
+
+    # Concatenate all encoded columns horizontally
+    if len(encoded_blocks) > 0:
+        x_encoded = np.concatenate(encoded_blocks, axis=1)
+    else:
+        x_encoded = np.zeros((n_samples, 0))
+
+    return x_encoded, new_feature_names, skipped_features
 
 
 

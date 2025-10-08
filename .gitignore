@@ -1,5 +1,9 @@
 # Ignore large data files
 dataset_clean/
+*.csv
+*.npz
+*.npy
+*.pkl
 dataset/
 *.csv
 *.npz

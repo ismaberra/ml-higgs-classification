@@ -1,12 +1,20 @@
-# Python cache
-__pycache__/
-*.pyc
+# Ignore large data files
+dataset/
+dataset_clean/
+*.csv
+*.npz
+*.npy
+*.pkl
 
-# Jupyter checkpoints
+# Ignore cache and temporary outputs
+__pycache__/
+artifacts/
+results/
+*.log
+*.tmp
+
+# Ignore Jupyter notebook checkpoints
 .ipynb_checkpoints/
 
-# Data files (we don't push raw CSVs)
-dataset/*.csv
-
-# OS-specific junk
+# Ignore OS junk files
 .DS_Store

@@ -9,6 +9,12 @@ dataset/
 *.npz
 *.npy
 *.pkl
+preprocessed/
+*.csv
+*.npz
+*.npy
+*.pkl
+*.json
 
 # Ignore cache and temporary outputs
 __pycache__/

@@ -1,7 +1,129 @@
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/UcP9Py08)
 
 
-### EDA Conclusion :
+# EDA Conclusion :
+
+### Ismael :
+
+## Goal :
+
+The preprocessing stage aimed to transform the raw dataset from Project 1 – ML212 into a clean, model-ready format by:
+- Correctly separating continuous, categorical, and binary features
+- Standardizing continuous variables
+- Efficiently one-hot-encoding categorical features
+- Reducing false positives in feature classification (e.g., year, date, or ID columns)
+
+## Feature-Type Detection :
+
+We implemented an improved detection function:
+categorical, continuous, binary = detect_feature_types_refined(x_train)
+This version uses:
+
+- Number of unique values
+- Dispersion (standard deviation of value gaps)
+- Value range
+
+to classify:
+
+- Binary: exactly two values (e.g., 0/1 or 1/2)
+- Categorical: few unique, irregularly spaced values
+- Continuous: many unique or regularly spaced values
+
+✅ Fixed issue:
+Features like IDAY, IMONTH, or IYEAR were wrongly treated as continuous.
+The refined logic now keeps them correctly separated.
+
+## Handling Survey Codes (7, 9, 77, 99…) (part of outliers handle) :
+
+Telephone survey data often encodes missing answers as 7, 9, 77, or 99.
+We created a function that detects and replaces such codes with NaN, but only when they are isolated outliers.
+
+x_clean = replace_survey_codes_by_pattern(x)
+
+
+Detection logic:
+- Large numerical gap compared to previous values
+- Value composed only of 7/9/0 digits
+- Replacement occurs only when consistent with the pattern
+
+✅ Benefit: keeps valid data while safely removing coded missing values.
+
+## Removing Date- or ID-like Features
+
+Columns such as IDAY, IMONTH, IYEAR, IDATE, or NUMADULT can distort normalization.
+We used:
+
+suspect_features = detect_date_or_id_features(x_train[:, continuous])
+
+
+and removed only those from the continuous set:
+
+for idx in suspect_features:
+    if idx in continuous:
+        continuous.remove(idx)
+
+
+✅ Result: removed 5–15 irrelevant columns while preserving valid variables.
+
+## Standardization of Continuous Features :
+
+Applied only on continuous feature indices:
+
+x_train_cont_std, x_test_cont_std = standardize(
+    x_train[:, continuous_train],
+    x_test[:, continuous_train]
+)
+
+
+Each variable is centered and scaled​
+
+Verified results:
+
+Mean ≈ 0, Std ≈ 1 for training data
+
+No leakage between train and test sets.
+
+## One-Hot Encoding of Categorical Features :
+
+Implemented a NumPy-only encoder:
+
+x_train_cat_encoded, cat_feature_names, skipped = one_hot_encode_numpy(
+    x_train[:, categorical_train],
+    feature_names=[feature_names[i] for i in categorical_train],
+    max_categories=30
+)
+
+
+Settings:
+
+max_categories=30 prevents feature explosion
+
+Features with too many unique values are automatically skipped
+
+Handles NaNs safely
+
+✅ Result:
+
+~101 categorical features → ~500 encoded columns
+
+<5 % skipped due to high cardinality
+
+Final structure:
+
+[ standardized continuous | one-hot categorical | binary ]
+
+
+## Final Concatenation
+
+All cleaned blocks are merged together:
+
+x_train_final = np.concatenate(
+    [x_train_cont_std, x_train_cat_encoded, x_train_bin],
+    axis=1
+)
+
+
+The same logic is applied to the test set once categorical encoding is aligned.
 
 
 

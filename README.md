@@ -6,7 +6,7 @@
 ### Ismael :
 
 
-During exploratory analysis, we found that feature BPHIGH4 (high blood pressure diagnosis) is coded as 1=Yes, 3=No, 7/9=Unknown.
+During exploratory analysis, we found that feature BPHIGH4 (idx 35) (high blood pressure diagnosis) is coded as 1=Yes, 3=No, 7/9=Unknown.
 The “3” category shows almost exclusively respondents without heart disease, confirming its inverse relation with MICHD.
 This supports the decision to binarize such features into (Yes/No) while treating 7/9 as missing values.
 

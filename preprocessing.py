@@ -303,15 +303,14 @@ def fit_preprocessor(
     cat_strategy: str = "mode",
     onehot_min_count: int = 50,
     onehot_max_categories: int = 50,
-    drop_duplicates: bool = False, 
+    drop_duplicates: bool = False,
 ):
     """
     Fit the preprocessing state on TRAIN ONLY.
-    Returns:
-        state: dict containing everything needed to transform any split
+    Returns a dict containing everything needed to transform any split.
     """
     state = {
-        # config
+        # --- config ---
         "missing_threshold": float(missing_threshold),
         "drop_low_var": bool(drop_low_var),
         "lowvar_threshold": float(lowvar_threshold),
@@ -319,100 +318,86 @@ def fit_preprocessor(
         "cat_strategy": cat_strategy,
         "onehot_min_count": int(onehot_min_count),
         "onehot_max_categories": int(onehot_max_categories),
-
-        # learned selections
-        "kept_after_missing": None,   # absolute indices w.r.t. original X_train
-        "kept_after_lowvar_rel": None,  # indices relative to post-missing
+        # --- learned selections ---
+        "kept_after_missing": None,
+        "kept_after_lowvar_rel": None,
         "kept_after_dups_rel": None,
-        "final_kept_abs": None,       # absolute original indices of columns that survived both drops
-
-        # remapped feature groups (relative to post-lowvar)
+        "final_kept_abs": None,
+        # --- groups ---
         "cont_features": None,
         "cat_features": None,
-
-        # imputer
+        # --- learned parameters ---
         "imp_cont": None,
         "imp_cat": None,
-
-        # standardizer
         "std_means": None,
         "std_stds": None,
-
-        # one-hot
         "onehot_specs": None,
-
-        # bookkeeping
+        # --- bookkeeping ---
         "final_dim_before_oh": None,
     }
 
-    # 1) Drop features > missing_threshold
+    # Drop features with too many missing values
     X_miss, kept_after_missing, _ = drop_missing_features(X_train, threshold=missing_threshold)
 
-    # 2) Drop low variance (optional)
+    # Drop low-variance features (optional)
     if drop_low_var:
         X_lv, kept_lowvar_rel, _ = drop_low_variance_features(X_miss, threshold=lowvar_threshold)
     else:
         X_lv, kept_lowvar_rel = X_miss, list(range(X_miss.shape[1]))
 
-    # Compose final absolute kept indices (original coordinates)
-    final_kept_abs = [kept_after_missing[i] for i in kept_lowvar_rel]
+    # Drop duplicate features right after low variance
+    if drop_duplicates:
+        X_dd, kept_dups_rel, dup_map = drop_duplicate_features(X_lv)
+    else:
+        X_dd, kept_dups_rel, dup_map = X_lv, list(range(X_lv.shape[1])), {}
 
-    # 3) Remap continuous feature indices through selections
+    #  Compose absolute kept indices relative to original columns 
+    final_kept_abs = [kept_after_missing[i] for i in kept_lowvar_rel]
+    final_kept_abs = [final_kept_abs[i] for i in kept_dups_rel]
+
+    # Remap continuous indices through all previous selections
     cont_after_missing = _remap_indices_through_keep(cont_features_orig, kept_after_missing)
     cont_after_lowvar = _remap_indices_through_keep(cont_after_missing, kept_lowvar_rel)
+    cont_after_dups   = _remap_indices_through_keep(cont_after_lowvar, kept_dups_rel)
 
-    # 4) Define categorical as complement at this stage
-    n_cols_lv = X_lv.shape[1]
-    cat_after_lowvar = _complement(n_cols_lv, cont_after_lowvar)
-
-    # 5) Fit imputer on X_lv (train only)
-    imp_cont, imp_cat = fit_imputer(X_lv, cont_after_lowvar, strategy_cont=cont_strategy, strategy_cat=cat_strategy)
-
-    # 6) Impute train to compute scaler safely
-    X_imp = apply_imputer(X_lv, imp_cont, imp_cat)
-
-    # 6) Drop duplicate features (optional, Level 3)
-    if drop_duplicates:
-        X_dd, kept_dups_rel, dup_map = drop_duplicate_features(X_imp)
-    else:
-        X_dd, kept_dups_rel, dup_map = X_imp, list(range(X_imp.shape[1])), {}
-
-    # Remap continuous indices through the duplicate keep
-    cont_after_dups = _remap_indices_through_keep(cont_after_lowvar, kept_dups_rel)
     n_cols_dd = X_dd.shape[1]
     cat_after_dups = _complement(n_cols_dd, cont_after_dups)
 
-    # 7) Fit standardizer on post-dup imputed matrix
-    std_means, std_stds = fit_standardizer(X_dd, cont_after_dups)
+    # Fit imputers on de-duplicated matrix
+    imp_cont, imp_cat = fit_imputer(X_dd, cont_after_dups,
+                                    strategy_cont=cont_strategy,
+                                    strategy_cat=cat_strategy)
 
-    # 8) Fit one-hot specs on post-dup imputed matrix
+    # Apply imputation once to compute standardization safely
+    X_imp = apply_imputer(X_dd, imp_cont, imp_cat)
+
+    # Fit standardizer on continuous features
+    std_means, std_stds = fit_standardizer(X_imp, cont_after_dups)
+
+    # Fit one-hot encoder specs on categorical features
     oh_specs = fit_one_hot(
-        X_dd, cat_after_dups,
+        X_imp, cat_after_dups,
         min_count=onehot_min_count,
         max_categories=onehot_max_categories
     )
-    # ensure specs keys are plain ints
     oh_specs = {int(k): {"values": v["values"], "other": v["other"]}
                 for k, v in oh_specs.items()}
-    state["onehot_specs"] = oh_specs
 
-    # Populate state
-    state["kept_after_missing"] = kept_after_missing
-    state["kept_after_lowvar_rel"] = kept_lowvar_rel
-    state["final_kept_abs"] = final_kept_abs
-
-    state["cont_features"] = cont_after_lowvar
-    state["cat_features"] = cat_after_lowvar
-
-    state["imp_cont"] = imp_cont
-    state["imp_cat"] = imp_cat
-
-    state["std_means"] = std_means
-    state["std_stds"] = std_stds
-
-    state["onehot_specs"] = oh_specs
-    state["final_dim_before_oh"] = int(n_cols_lv)
-
+    #  Store everything 
+    state.update({
+        "kept_after_missing": kept_after_missing,
+        "kept_after_lowvar_rel": kept_lowvar_rel,
+        "kept_after_dups_rel": kept_dups_rel,
+        "final_kept_abs": final_kept_abs,
+        "cont_features": cont_after_dups,
+        "cat_features": cat_after_dups,
+        "imp_cont": imp_cont,
+        "imp_cat": imp_cat,
+        "std_means": std_means,
+        "std_stds": std_stds,
+        "onehot_specs": oh_specs,
+        "final_dim_before_oh": int(n_cols_dd),
+    })
     return state
 
 
@@ -425,18 +410,18 @@ def transform_with_state(X: np.ndarray, state: dict):
     Returns:
         X_proc: standardized continuous || one-hot categorical (concatenated)
     """
-    # 1) Missing-drop
+    # Missing-drop
     kept_after_missing = _to_int_list(state["kept_after_missing"])
     X1 = X[:, kept_after_missing]
 
-    # 2) Low-variance drop (relative to X1)
+    # Low-variance drop (relative to X1)
     kept_lowvar_rel = _to_int_list(state["kept_after_lowvar_rel"])
     X2 = X1[:, kept_lowvar_rel]
 
-    # 3) Impute
+    # Impute
     X2_imp = apply_imputer(X2, state["imp_cont"], state["imp_cat"])
 
-    # 4) Duplicate-drop (relative to X2_imp)
+    # Duplicate-drop (relative to X2_imp)
     kept_dups_rel = state.get("kept_after_dups_rel")
     if kept_dups_rel is None:
         kept_dups_rel = list(range(X2_imp.shape[1]))   # keep all if no dup-drop used
@@ -444,7 +429,7 @@ def transform_with_state(X: np.ndarray, state: dict):
         kept_dups_rel = _to_int_list(kept_dups_rel)
     X3 = X2_imp[:, kept_dups_rel]
 
-    # 5) Standardize continuous (indices are relative to X3)
+    # Standardize continuous (indices are relative to X3)
     cont_feats = _to_int_list(state["cont_features"])
     # normalize scaler dict keys to plain ints too (in case they were np.int64)
     std_means = {int(k): float(v) for k, v in state["std_means"].items()}
@@ -452,7 +437,7 @@ def transform_with_state(X: np.ndarray, state: dict):
 
     X3_scaled = apply_standardizer(X3, cont_feats, std_means, std_stds)
 
-    # 6) One-hot categorical (relative to X3)
+    # One-hot categorical (relative to X3)
     cat_feats = [int(j) for j in state["cat_features"]]
 
     # normalize specs keys to int (paranoia + robustness)
@@ -461,13 +446,12 @@ def transform_with_state(X: np.ndarray, state: dict):
     # assert mapping consistency; if any cat index is missing, drop it with a warning
     missing = [j for j in cat_feats if j not in specs]
     if missing:
-        # You can print or log; here we prune them to avoid a hard crash
         print(f"[warn] onehot specs missing for categorical indices {missing}; skipping those columns")
         cat_feats = [j for j in cat_feats if j in specs]
         
     X_cat = transform_one_hot(X3_scaled, cat_feats, state["onehot_specs"])
 
-    # 7) Concatenate: continuous (scaled) + categorical (one-hot)
+    # Concatenate: continuous (scaled) + categorical (one-hot)
     if len(cont_feats) > 0:
         X_cont = X3_scaled[:, cont_feats]
     else:
@@ -587,7 +571,7 @@ def run_all_levels(x_train, x_test, y_train, cont_features_orig, only = None):
 
         # OVERSAMPLING for balancing
         if name in ["level2", "level3", "level4"]:
-            print(f"  -> Oversampling positives to reach 50% ratio...")
+            print(f"  -> Oversampling positives to reach 35% ratio...")
             Xtr, ytr = oversample_minority(Xtr, ytr, target_pos_ratio=0.35)
 
         save_csvs_and_state(Xtr, ytr, Xte, state, f"preprocessed/{name}")
@@ -597,7 +581,7 @@ def run_all_levels(x_train, x_test, y_train, cont_features_orig, only = None):
 # ============================================================
 
 def main():
-    from helpers import load_csv_data  # stdlib + numpy only
+    from helpers import load_csv_data  
 
     # 1) Load raw data
     x_train, x_test, y_train, _, _ = load_csv_data("dataset")
@@ -615,7 +599,7 @@ def main():
 
     cont_features_orig = continuous  # original-coordinate indices
 
-    # 3) Run all levels and export each to its own folder
+    # Run all levels and export each to its own folder
     os.makedirs("preprocessed", exist_ok=True)
     run_all_levels(x_train, x_test, y_train, cont_features_orig, only=["level3"])
 

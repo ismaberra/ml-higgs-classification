@@ -1,542 +1,503 @@
-"""
-Experiment runner 
-
-- Loads data via helpers.load_csv_data
-- Optional preprocessing via preprocessing.preprocess_pipeline
-- Supports raw or preprocessed features in one unified pipeline
-- K-fold cross-validation and hyperparameter search
-- Metrics: accuracy, precision, recall, F1, log loss (logistic), ROC-AUC, PR-AUC
-- Plots: ROC, PR, and comparison bar charts
-- Verbose terminal logs for each step
-
-Only NumPy and Matplotlib are used, per project rules.
-"""
-
-from __future__ import annotations
-
 import argparse
 import json
-import math
 import os
 import time
-import hashlib
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
-
-from helpers import load_csv_data, create_csv_submission
-import implementations as impl
-import preprocessing as prep
-
-
-# -------------------------------
-# FS utils and RNG
-# -------------------------------
-
-def ensure_dir(path: str) -> None:
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from implementations import (
+    logistic_regression,
+    reg_logistic_regression,
+)
+from helpers import create_csv_submission, load_csv_data
 
 
-def get_rng(seed: int | None) -> np.random.Generator:
-    return np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+def load_preprocessed(data_dir):
+    """Load preprocessed matrices (no IDs) from a directory.
+
+    Expects `x_train.csv`, `y_train.csv`, `x_test.csv` in `data_dir`.
+    Returns `X, y, Xtest`.
+    """
+    x_train = np.loadtxt(os.path.join(data_dir, "x_train.csv"), delimiter=",", dtype=np.float64)
+    y_train = np.loadtxt(os.path.join(data_dir, "y_train.csv"), delimiter=",", dtype=np.float64)
+    x_test = np.loadtxt(os.path.join(data_dir, "x_test.csv"), delimiter=",", dtype=np.float64)
+    if isinstance(y_train, np.ndarray) and y_train.ndim > 1:
+        y_train = y_train.reshape(-1)
+    return x_train, y_train, x_test
 
 
-def round_floats(obj, ndigits: int = 5):
-    if isinstance(obj, float):
-        return round(obj, ndigits)
-    if isinstance(obj, dict):
-        return {k: round_floats(v, ndigits) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [round_floats(v, ndigits) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(round_floats(v, ndigits) for v in obj)
-    return obj
+def to01(y):
+    """Map labels from {-1, 1} to {0, 1}."""
+    # map {-1,1} -> {0,1}
+    return (y + 1) / 2
 
 
-# -------------------------------
-# Metrics for binary classification
-# y in {-1, 1}
-# -------------------------------
+def to_sign(yhat_prob, threshold=0.5):
+    """Convert probabilities to {-1, 1} labels using a threshold.
 
-def _to01(y_pm1: np.ndarray) -> np.ndarray:
-    return ((y_pm1 + 1.0) / 2.0).astype(np.float64)
+    Args:
+        yhat_prob: Probability scores in [0, 1].
+        threshold: Cutoff for the positive class.
 
-
-def accuracy(y_true_pm1: np.ndarray, y_pred_pm1: np.ndarray) -> float:
-    return float((y_true_pm1 == y_pred_pm1).mean())
-
-
-def precision_recall_f1(y_true_pm1: np.ndarray, y_pred_pm1: np.ndarray) -> Tuple[float, float, float]:
-    tp = float(((y_true_pm1 == 1) & (y_pred_pm1 == 1)).sum())
-    fp = float(((y_true_pm1 == -1) & (y_pred_pm1 == 1)).sum())
-    fn = float(((y_true_pm1 == 1) & (y_pred_pm1 == -1)).sum())
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-    return precision, recall, f1
+    Returns:
+        Numpy array of predictions in {-1, 1}.
+    """
+    # map prob-> {-1,1}
+    return np.where(yhat_prob >= threshold, 1, -1)
 
 
-def log_loss_from_probs(y_true_pm1: np.ndarray, y_prob: np.ndarray, eps: float = 1e-12) -> float:
-    y01 = _to01(y_true_pm1)
-    p = np.clip(y_prob, eps, 1 - eps)
-    return float(-(y01 * np.log(p) + (1 - y01) * np.log(1 - p)).mean())
-
-
-def roc_curve(y_true_pm1: np.ndarray, y_score: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    order = np.argsort(-y_score)
-    y = (y_true_pm1[order] == 1).astype(np.int32)
-    tp = np.cumsum(y)
-    fp = np.cumsum(1 - y)
-    P = float(y.sum())
-    N = float((1 - y).sum())
-    tpr = tp / P if P > 0 else np.zeros_like(tp, dtype=np.float64)
-    fpr = fp / N if N > 0 else np.zeros_like(fp, dtype=np.float64)
-    tpr = np.concatenate([[0.0], tpr])
-    fpr = np.concatenate([[0.0], fpr])
-    return fpr, tpr
-
-
-def auc(x: np.ndarray, y: np.ndarray) -> float:
-    return float(np.trapz(y, x))
-
-
-def precision_recall_curve(y_true_pm1: np.ndarray, y_score: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    order = np.argsort(-y_score)
-    y = (y_true_pm1[order] == 1).astype(np.int32)
-    tp = np.cumsum(y)
-    fp = np.cumsum(1 - y)
-    P = float(y.sum())
-    precision = tp / np.maximum(tp + fp, 1)
-    recall = tp / P if P > 0 else np.zeros_like(tp, dtype=np.float64)
-    precision = np.concatenate([[1.0], precision])
-    recall = np.concatenate([[0.0], recall])
-    return recall, precision
-
-
-def pr_auc(y_true_pm1: np.ndarray, y_score: np.ndarray) -> float:
-    recall, precision = precision_recall_curve(y_true_pm1, y_score)
-    return auc(recall, precision)
-
-
-# -------------------------------
-# Data loading / preprocessing (with optional caching)
-# -------------------------------
-
-@dataclass
-class DataBundle:
-    X_train: np.ndarray
-    y_train: np.ndarray
-    X_test: np.ndarray
-    train_ids: np.ndarray
-    test_ids: np.ndarray
-    preprocess_report: dict | None
-
-
-def load_data(
-    data_dir: str,
-    use_preprocessed: bool,
-    seed: int | None,
-    oversample_ratio: float | None,
-    cont_features: List[int] | None,
-    cache_data: bool = False,
-    cache_dir: str | None = None,
-) -> DataBundle:
-    def file_mtime(path: str) -> float:
-        try:
-            return os.path.getmtime(path)
-        except OSError:
-            return 0.0
-
-    def build_cache_key() -> str:
-        xtr_p = os.path.join(data_dir, "x_train.csv")
-        xte_p = os.path.join(data_dir, "x_test.csv")
-        ytr_p = os.path.join(data_dir, "y_train.csv")
-        payload = {
-            "use_preprocessed": bool(use_preprocessed),
-            "oversample": float(oversample_ratio) if oversample_ratio is not None else None,
-            "cont_features": list(cont_features) if cont_features is not None else None,
-            "mtimes": {
-                "x_train.csv": file_mtime(xtr_p),
-                "x_test.csv": file_mtime(xte_p),
-                "y_train.csv": file_mtime(ytr_p),
-            },
-        }
-        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-    print(f"[Data] Loading CSVs from '{data_dir}'...")
-    x_train_raw, x_test_raw, y_train_pm1, train_ids, test_ids = load_csv_data(data_dir)
-    print(f"[Data] Raw shapes: X_train={x_train_raw.shape}, X_test={x_test_raw.shape}")
-
-    cache_dir = cache_dir or os.path.join(data_dir, "..", "artifacts")
-    ensure_dir(cache_dir)
-    cache_key = build_cache_key()
-    cache_npz = os.path.join(cache_dir, f"cache_{cache_key}.npz")
-
-    if cache_data and os.path.exists(cache_npz):
-        print(f"[Data] Cache hit: {cache_npz}")
-        arrs = np.load(cache_npz)
-        return DataBundle(arrs["X_train"], arrs["y_train"], arrs["X_test"], arrs["train_ids"], arrs["test_ids"], None)
-
-    if not use_preprocessed:
-        print("[Data] Using RAW features (no preprocessing).")
-        Xtr, ytr = x_train_raw, y_train_pm1
-        if oversample_ratio is not None:
-            print(f"[Data] Oversampling positives to ratio {oversample_ratio:.2f}...")
-            Xtr, ytr = prep.oversample_minority(Xtr, ytr, target_pos_ratio=oversample_ratio, rng=get_rng(seed))
-            print(f"[Data] After oversample: X_train={Xtr.shape}, pos_ratio={(ytr==1).mean():.5f}")
-        bundle = DataBundle(Xtr, ytr, x_test_raw, train_ids, test_ids, None)
-    else:
-        print("[Prep] Applying preprocessing pipeline...")
-        Xtr, ytr, Xte, report = prep.preprocess_pipeline(
-            x_train_raw,
-            y_train_pm1,
-            x_test_raw,
-            cont_features=cont_features,
-            strategy_cont="mean",
-            target_pos_ratio=oversample_ratio,
-            rng=get_rng(seed),
-        )
-        print(f"[Prep] Done. Shapes: X_train={Xtr.shape}, X_test={Xte.shape}")
-        if oversample_ratio is not None:
-            print(f"[Prep] Post-oversample pos_ratio={(ytr==1).mean():.5f}")
-        bundle = DataBundle(Xtr, ytr, Xte, train_ids, test_ids, report)
-
-    if cache_data:
-        print(f"[Data] Writing cache: {cache_npz}")
-        np.savez_compressed(cache_npz, X_train=bundle.X_train, y_train=bundle.y_train, X_test=bundle.X_test,
-                             train_ids=bundle.train_ids, test_ids=bundle.test_ids)
-    return bundle
-
-
-# -------------------------------
-# Model helpers
-# -------------------------------
-
-def sigmoid(z: np.ndarray) -> np.ndarray:
+def sigmoid(z):
+    """Numerically stable sigmoid applied element-wise."""
+    z = np.asarray(z, dtype=np.float64)
     out = np.empty_like(z, dtype=np.float64)
-    pos = z >= 0
-    neg = ~pos
-    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
-    ez = np.exp(z[neg])
-    out[neg] = ez / (1.0 + ez)
+    mask = z >= 0
+    out[mask] = 1.0 / (1.0 + np.exp(-z[mask]))
+    ez = np.exp(z[~mask])
+    out[~mask] = ez / (1.0 + ez)
     return out
 
 
-def predict_scores(model: str, X: np.ndarray, w: np.ndarray) -> np.ndarray:
-    z = X @ w
-    if model in {"logistic", "reg_logistic"}:
-        return sigmoid(z)
-    return z
+def predict_scores(X, w):
+    """Predict positive-class probabilities for logistic models.
+
+    Args:
+        X: Feature matrix of shape (n_samples, n_features).
+        w: Weight vector of shape (n_features,).
+
+    Returns:
+        Array of probabilities in [0, 1].
+    """
+    # probabilities for logistic family
+    scores = X @ w
+    return sigmoid(scores)
 
 
-def fit_model(model: str, X: np.ndarray, y_pm1: np.ndarray, params: dict, rng: np.random.Generator) -> Tuple[np.ndarray, float]:
-    y01 = _to01(y_pm1)
-    if model == "mse_gd":
-        w0 = params.get("w0", rng.normal(0, 0.01, size=X.shape[1]))
-        w, loss = impl.mean_squared_error_gd(y_pm1, X, w0, int(params["max_iters"]), float(params["gamma"]))
-        return w, float(loss)
-    if model == "mse_sgd":
-        w0 = params.get("w0", rng.normal(0, 0.01, size=X.shape[1]))
-        w, loss = impl.mean_squared_error_sgd(y_pm1, X, w0, int(params["max_iters"]), float(params["gamma"]))
-        return w, float(loss)
-    if model == "least_squares":
-        w, loss = impl.least_squares(y_pm1, X)
-        return w, float(loss)
-    if model == "ridge":
-        w, loss = impl.ridge_regression(y_pm1, X, float(params["lambda"]))
-        return w, float(loss)
+def compute_metrics(y_true_sign, y_pred_sign):
+    """Compute binary classification metrics for {-1, 1} labels.
+
+    Returns a dict with counts and precision/recall/F1/accuracy.
+    """
+    tp = np.sum((y_true_sign == 1) & (y_pred_sign == 1))
+    fp = np.sum((y_true_sign == -1) & (y_pred_sign == 1))
+    fn = np.sum((y_true_sign == 1) & (y_pred_sign == -1))
+    tn = np.sum((y_true_sign == -1) & (y_pred_sign == -1))
+    precision = tp / (tp + fp + 1e-12)
+    recall = tp / (tp + fn + 1e-12)
+    f1 = 2 * precision * recall / (precision + recall + 1e-12)
+    acc = (tp + tn) / max(1, y_true_sign.size)
+    return {
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tn": int(tn),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "accuracy": float(acc),
+    }
+
+
+def compute_auc(scores, y_true_sign):
+    """Compute ROC AUC and PR AUC from scores and {-1,1} labels."""
+    order = np.argsort(-scores)
+    y = (y_true_sign[order] == 1).astype(float)
+    tp = np.cumsum(y)
+    fp = np.cumsum(1 - y)
+    pos = y.sum()
+    neg = y.size - pos
+    tpr = tp / max(1.0, pos)
+    fpr = fp / max(1.0, neg)
+    precision = tp / np.maximum(1.0, tp + fp)
+    recall = tpr
+    roc_auc = float(np.trapz(tpr, fpr))
+    pr_auc = float(np.trapz(precision, recall))
+    return roc_auc, pr_auc
+
+
+def kfold_indices(n_samples, k, seed=1, y=None):
+    """Create stratified K-fold indices for {-1, 1} labels.
+
+    If `y` is None, returns non-stratified folds.
+    """
+    rng = np.random.default_rng(seed)
+    indices = np.arange(n_samples)
+    if y is None:
+        rng.shuffle(indices)
+        folds = np.array_split(indices, k)
+        return folds
+    # Stratified by sign of y
+    pos = indices[y == 1]
+    neg = indices[y == -1]
+    rng.shuffle(pos)
+    rng.shuffle(neg)
+    pos_folds = np.array_split(pos, k)
+    neg_folds = np.array_split(neg, k)
+    folds = [np.concatenate([p, n]) for p, n in zip(pos_folds, neg_folds)]
+    for f in folds:
+        rng.shuffle(f)
+    return folds
+
+
+def train_once(model, X, y_sign, args):
+    """Train a single logistic-family model on the provided data.
+
+    Args:
+        model: Either "logistic" or "reg_logostic".
+        X: Training features.
+        y_sign: Labels in {-1, 1}.
+        args: Namespace with hyperparameters.
+
+    Returns:
+        Tuple `(w, loss)` with learned weights and data loss.
+    """
+    n_features = X.shape[1]
+    init_w = np.zeros(n_features)
+    y01 = to01(y_sign)
+
     if model == "logistic":
-        w0 = params.get("w0", rng.normal(0, 0.01, size=X.shape[1]))
-        w, loss = impl.logistic_regression(y01, X, w0, int(params["max_iters"]), float(params["gamma"]))
-        return w, float(loss)
-    if model == "reg_logistic":
-        w0 = params.get("w0", rng.normal(0, 0.01, size=X.shape[1]))
-        w, loss = impl.reg_logistic_regression(y01, X, float(params["lambda"]), w0, int(params["max_iters"]), float(params["gamma"]))
-        return w, float(loss)
-    raise ValueError(f"Unknown model: {model}")
-
-
-# -------------------------------
-# CV, search, and evaluation
-# -------------------------------
-
-def k_fold_indices(n_samples: int, k: int, rng: np.random.Generator) -> List[Tuple[np.ndarray, np.ndarray]]:
-    idx = np.arange(n_samples)
-    rng.shuffle(idx)
-    folds = np.array_split(idx, k)
-    return [(np.concatenate([folds[j] for j in range(k) if j != i]), folds[i]) for i in range(k)]
-
-
-def optimal_threshold_by_f1(y_true_pm1: np.ndarray, y_score: np.ndarray, is_prob: bool) -> float:
-    if is_prob:
-        thresholds = np.linspace(0.0, 1.0, 201)
-    else:
-        unique_scores = np.unique(y_score)
-        thresholds = np.concatenate([[-math.inf], unique_scores, [math.inf]])
-    best_f1, best_t = -1.0, 0.5 if is_prob else 0.0
-    for t in thresholds:
-        y_pred = np.where(y_score >= t, 1, -1)
-        _, _, f1 = precision_recall_f1(y_true_pm1, y_pred)
-        if f1 > best_f1:
-            best_f1, best_t = f1, float(t)
-    return best_t
-
-
-def evaluate_split(model: str, X_tr: np.ndarray, y_tr: np.ndarray, X_va: np.ndarray, y_va: np.ndarray, params: dict, rng: np.random.Generator) -> Dict[str, float]:
-    w, _ = fit_model(model, X_tr, y_tr, params, rng)
-    scores = predict_scores(model, X_va, w)
-    is_prob = model in {"logistic", "reg_logistic"}
-    thr = optimal_threshold_by_f1(y_va, scores, is_prob)
-    y_pred = np.where(scores >= thr, 1, -1)
-    acc = accuracy(y_va, y_pred)
-    prec, rec, f1 = precision_recall_f1(y_va, y_pred)
-    fpr, tpr = roc_curve(y_va, scores)
-    roc_area = auc(fpr, tpr)
-    pr_area = pr_auc(y_va, scores)
-    ll = log_loss_from_probs(y_va, scores) if is_prob else float('nan')
-    return {"acc": acc, "precision": prec, "recall": rec, "f1": f1, "roc_auc": roc_area, "pr_auc": pr_area, "log_loss": ll, "threshold": thr}
-
-
-def grid_search(model: str, X: np.ndarray, y: np.ndarray, param_grid: List[dict], k: int, seed: int | None, verbose: bool = True) -> Tuple[dict, Dict[str, float], List[dict]]:
-    rng = get_rng(seed)
-    splits = k_fold_indices(X.shape[0], k, rng)
-    results = []
-    if verbose:
-        print(f"[Search] {model}: {len(param_grid)} configuration(s), {k}-fold CV")
-    for i, params in enumerate(param_grid, start=1):
-        if verbose:
-            print(f"  [Search] {i}/{len(param_grid)} params={params}")
-        fold_metrics = []
-        for fi, (tr, va) in enumerate(splits, start=1):
-            m = evaluate_split(model, X[tr], y[tr], X[va], y[va], params, rng)
-            fold_metrics.append(m)
-            if verbose:
-                print("    [Fold {}] acc={:.5f} prec={:.5f} rec={:.5f} f1={:.5f} rocAUC={:.5f} prAUC={:.5f}".format(
-                    fi, m["acc"], m["precision"], m["recall"], m["f1"], m["roc_auc"], m["pr_auc"]))
-        avg = {k: float(np.nanmean([m[k] for m in fold_metrics])) for k in fold_metrics[0].keys()}
-        if verbose:
-            print("  [Search] avg -> acc={:.5f} prec={:.5f} rec={:.5f} f1={:.5f} rocAUC={:.5f} prAUC={:.5f}".format(
-                avg["acc"], avg["precision"], avg["recall"], avg["f1"], avg["roc_auc"], avg["pr_auc"]))
-        results.append({"params": params, "metrics": avg})
-
-    def score_key(r):
-        m = r["metrics"]
-        return (m["f1"], m["pr_auc"], m["roc_auc"])  # higher is better
-
-    best = max(results, key=score_key)
-    if verbose:
-        print(f"[Search] Best params: {best['params']}")
-    return best["params"], best["metrics"], results
-
-
-# -------------------------------
-# Plotting
-# -------------------------------
-
-def plot_roc_pr(y_true_pm1: np.ndarray, scores: np.ndarray, out_prefix: str) -> Dict[str, float]:
-    fpr, tpr = roc_curve(y_true_pm1, scores)
-    roc_area = auc(fpr, tpr)
-    recall, precision = precision_recall_curve(y_true_pm1, scores)
-    pr_area = auc(recall, precision)
-
-    plt.figure(figsize=(5.2, 4.2))
-    plt.plot(fpr, tpr, label=f"ROC AUC={roc_area:.3f}")
-    plt.plot([0, 1], [0, 1], "k--", alpha=0.3)
-    plt.xlabel("FPR")
-    plt.ylabel("TPR")
-    plt.title("ROC curve")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f"{out_prefix}_roc.png", dpi=150)
-    plt.close()
-
-    plt.figure(figsize=(5.2, 4.2))
-    plt.plot(recall, precision, label=f"PR AUC={pr_area:.3f}")
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title("Precision-Recall curve")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f"{out_prefix}_pr.png", dpi=150)
-    plt.close()
-
-    return {"roc_auc": float(roc_area), "pr_auc": float(pr_area)}
-
-
-def plot_model_comparison(model_results: List[Tuple[str, Dict[str, float]]], out_path: str, metric: str = "f1") -> None:
-    labels = [name for name, _ in model_results]
-    values = [res[metric] for _, res in model_results]
-    plt.figure(figsize=(6.0, 4.0))
-    plt.bar(labels, values)
-    plt.ylabel(metric.upper())
-    plt.title(f"Model comparison ({metric.upper()})")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
-# -------------------------------
-# CLI and main
-# -------------------------------
-
-def build_param_grid(args: argparse.Namespace, model: str) -> List[dict]:
-    grid: List[dict] = []
-    if model == "mse_gd":
-        for g in args.mse_gammas:
-            grid.append({"gamma": float(g), "max_iters": int(args.mse_iters)})
-    elif model == "mse_sgd":
-        for g in args.mse_gammas:
-            grid.append({"gamma": float(g), "max_iters": int(args.mse_iters)})
-    elif model == "least_squares":
-        grid.append({})
-    elif model == "ridge":
-        for lam in args.ridge_lambdas:
-            grid.append({"lambda": float(lam)})
-    elif model == "logistic":
-        for g in args.logit_gammas:
-            grid.append({"gamma": float(g), "max_iters": int(args.logit_iters)})
+        w, loss = logistic_regression(y01, X, init_w, max_iters=args.max_iters, gamma=args.gamma)
     elif model == "reg_logistic":
-        for lam in args.reg_lambdas:
-            for g in args.logit_gammas:
-                grid.append({"lambda": float(lam), "gamma": float(g), "max_iters": int(args.logit_iters)})
+        w, loss = reg_logistic_regression(y01, X, lambda_=args.lambda_, initial_w=init_w, max_iters=args.max_iters, gamma=args.gamma)
     else:
         raise ValueError(f"Unknown model: {model}")
-    return grid
+    return w, float(loss)
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="EPFL ML Project 1 runner")
-    # data
-    p.add_argument("--data-dir", type=str, default="dataset")
-    p.add_argument("--use-preprocessed", action="store_true")
-    p.add_argument("--oversample", type=float, default=None, help="Target positive ratio (e.g., 0.35)")
-    p.add_argument("--cont-features", type=int, nargs="*", default=[7, 8, 222, 226, 229, 253])
-    p.add_argument("--cache-data", action="store_true")
-    p.add_argument("--cache-dir", type=str, default=None)
-    # experiment
-    p.add_argument("--model", type=str, required=True, choices=["mse_gd", "mse_sgd", "least_squares", "ridge", "logistic", "reg_logistic"])
-    p.add_argument("--compare-models", type=str, nargs="*", choices=["mse_gd", "mse_sgd", "least_squares", "ridge", "logistic", "reg_logistic"], help="Run multiple models and compare")
-    p.add_argument("--k-folds", type=int, default=5)
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--results-dir", type=str, default="results")
-    p.add_argument("--tag", type=str, default=None)
-    p.add_argument("--no-plots", action="store_true")
-    # hyperparams
-    p.add_argument("--mse-gammas", type=float, nargs="*", default=[0.1, 0.05, 0.02, 0.01])
-    p.add_argument("--mse-iters", type=int, default=2000)
-    p.add_argument("--ridge-lambdas", type=float, nargs="*", default=[1e-4, 1e-3, 1e-2, 1e-1, 1, 10])
-    p.add_argument("--logit-gammas", type=float, nargs="*", default=[0.1, 0.05, 0.02, 0.01])
-    p.add_argument("--logit-iters", type=int, default=2000)
-    p.add_argument("--reg-lambdas", type=float, nargs="*", default=[1e-4, 1e-3, 1e-2, 1e-1])
-    # submission (single-model mode)
-    p.add_argument("--make-submission", action="store_true")
-    return p.parse_args()
+def cross_validate(model, X, y_sign, k, seed, args):
+    """Perform K-fold cross-validation for logistic-family models.
+
+    Returns aggregate metrics (incl. AUCs), per-fold metrics, per-fold losses.
+    """
+    folds = kfold_indices(X.shape[0], k, seed=seed, y=y_sign)
+    fold_metrics = []
+    fold_losses = []
+    fold_roc_aucs = []
+    fold_pr_aucs = []
+    def eval_fold(i):
+        val_idx = folds[i]
+        train_idx = np.concatenate([folds[j] for j in range(k) if j != i])
+        Xtr, ytr = X[train_idx], y_sign[train_idx]
+        Xva, yva = X[val_idx], y_sign[val_idx]
+
+        w, loss = train_once(model, Xtr, ytr, args)
+        scores = predict_scores(Xva, w)
+        yhat = to_sign(scores, threshold=args.threshold)
+        metrics = compute_metrics(yva, yhat)
+        roc_auc, pr_auc = compute_auc(scores, yva)
+        return loss, metrics, roc_auc, pr_auc
+
+    cv_jobs = getattr(args, "cv_n_jobs", 1)
+    if cv_jobs > 1:
+        with ThreadPoolExecutor(max_workers=cv_jobs) as ex:
+            futures = [ex.submit(eval_fold, i) for i in range(k)]
+            it = futures
+            if getattr(args, "progress", True):
+                it = tqdm(as_completed(futures), total=k, desc="CV folds", leave=False)
+                for fut in it:
+                    loss, metrics, roc_auc, pr_auc = fut.result()
+                    fold_losses.append(loss)
+                    fold_metrics.append(metrics)
+                    fold_roc_aucs.append(roc_auc)
+                    fold_pr_aucs.append(pr_auc)
+            else:
+                for fut in as_completed(futures):
+                    loss, metrics, roc_auc, pr_auc = fut.result()
+                    fold_losses.append(loss)
+                    fold_metrics.append(metrics)
+                    fold_roc_aucs.append(roc_auc)
+                    fold_pr_aucs.append(pr_auc)
+    else:
+        fold_iter = range(k)
+        if getattr(args, "progress", True):
+            fold_iter = tqdm(fold_iter, desc="CV folds", leave=False)
+        for i in fold_iter:
+            loss, metrics, roc_auc, pr_auc = eval_fold(i)
+            fold_losses.append(loss)
+            fold_metrics.append(metrics)
+            fold_roc_aucs.append(roc_auc)
+            fold_pr_aucs.append(pr_auc)
+
+    # Aggregate
+    agg = {k: float(np.mean([m[k] for m in fold_metrics])) for k in fold_metrics[0].keys()}
+    agg["loss_mean"] = float(np.mean(fold_losses))
+    agg["loss_std"] = float(np.std(fold_losses))
+    agg["roc_auc"] = float(np.mean(fold_roc_aucs))
+    agg["pr_auc"] = float(np.mean(fold_pr_aucs))
+    return agg, fold_metrics, fold_losses
 
 
-def main() -> None:
-    args = parse_args()
-    ensure_dir(args.results_dir)
+def plot_curves(scores, y_true_sign, out_dir, prefix="train"):
+    """Plot ROC and PR curves and save PNGs.
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    exp_root = "compare" if args.compare_models else args.model
-    exp_name = f"{exp_root}_{args.tag}_{timestamp}" if args.tag else f"{exp_root}_{timestamp}"
-    out_dir = os.path.join(args.results_dir, exp_name)
-    ensure_dir(out_dir)
+    Args:
+        scores: Scores or probabilities (higher means more positive).
+        y_true_sign: Ground-truth labels in {-1, 1}.
+        out_dir: Directory to save figures.
+        prefix: Filename prefix for the plots.
 
-    print(f"[Run] Model={args.model} | Compare={args.compare_models is not None} | folds={args.k_folds} | seed={args.seed}")
-    print(f"[Run] Preprocessed={'YES' if args.use_preprocessed else 'NO'} | Oversample={args.oversample}")
+    Returns:
+        Dict with numeric AUCs for ROC and PR.
+    """
+    # ROC and PR from scratch (coarse) for binary sign labels
+    # Sort by descending score
+    order = np.argsort(-scores)
+    y = (y_true_sign[order] == 1).astype(float)
+    tp = np.cumsum(y)
+    fp = np.cumsum(1 - y)
+    pos = y.sum()
+    neg = y.size - pos
+    tpr = tp / max(1.0, pos)
+    fpr = fp / max(1.0, neg)
+    precision = tp / np.maximum(1.0, tp + fp)
+    recall = tpr
 
-    data = load_data(
-        data_dir=args.data_dir,
-        use_preprocessed=args.use_preprocessed,
-        seed=args.seed,
-        oversample_ratio=args.oversample,
-        cont_features=args.cont_features,
-        cache_data=args.cache_data,
-        cache_dir=args.cache_dir,
-    )
+    # ROC AUC (trapezoid)
+    roc_auc = float(np.trapz(tpr, fpr))
+    # PR AUC
+    pr_auc = float(np.trapz(precision, recall))
 
-    # Multi-model path
-    if args.compare_models:
-        models = args.compare_models
-        comparison = []
-        per_model = {}
-        for model_name in models:
-            print(f"[Compare] Running {model_name}...")
-            grid = build_param_grid(args, model_name)
-            best_params, best_metrics, _all = grid_search(model_name, data.X_train, data.y_train, grid, args.k_folds, args.seed)
-            rng = get_rng(args.seed)
-            w_best, _ = fit_model(model_name, data.X_train, data.y_train, best_params, rng)
-            scores_tr = predict_scores(model_name, data.X_train, w_best)
-            is_prob = model_name in {"logistic", "reg_logistic"}
-            thr = optimal_threshold_by_f1(data.y_train, scores_tr, is_prob)
-            y_pred_tr = np.where(scores_tr >= thr, 1, -1)
-            final_metrics = {
-                "acc": accuracy(data.y_train, y_pred_tr),
-                "precision": precision_recall_f1(data.y_train, y_pred_tr)[0],
-                "recall": precision_recall_f1(data.y_train, y_pred_tr)[1],
-                "f1": precision_recall_f1(data.y_train, y_pred_tr)[2],
-                "log_loss": log_loss_from_probs(data.y_train, scores_tr) if is_prob else float('nan'),
-            }
-            if not args.no_plots:
-                aucs = plot_roc_pr(data.y_train, scores_tr, os.path.join(out_dir, f"{model_name}_train"))
-                final_metrics.update(aucs)
-            comparison.append((model_name, final_metrics))
-            per_model[model_name] = {"best_params": best_params, "cv_best_metrics": best_metrics, "threshold": float(thr), "final_train_metrics": final_metrics}
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"ROC AUC={roc_auc:.3f}")
+    plt.plot([0,1],[0,1], linestyle="--", color="gray")
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    plt.title("ROC Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{prefix}_roc.png"))
+    plt.close()
 
-        if not args.no_plots and len(comparison) > 1:
-            plot_model_comparison(comparison, os.path.join(out_dir, "compare_f1.png"), metric="f1")
-            plot_model_comparison(comparison, os.path.join(out_dir, "compare_roc_auc.png"), metric="roc_auc")
-            plot_model_comparison(comparison, os.path.join(out_dir, "compare_pr_auc.png"), metric="pr_auc")
+    plt.figure()
+    plt.plot(recall, precision, label=f"PR AUC={pr_auc:.3f}")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("PR Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{prefix}_pr.png"))
+    plt.close()
 
-        summary = {"models": models, "use_preprocessed": bool(args.use_preprocessed), "oversample": args.oversample, "k_folds": int(args.k_folds), "seed": int(args.seed), "n_train": int(data.X_train.shape[0]), "n_features": int(data.X_train.shape[1]), "details": per_model}
-        with open(os.path.join(out_dir, "comparison_summary.json"), "w") as f:
-            json.dump(round_floats(summary, 5), f, indent=2)
-        print("[Compare] F1:", {name: round(mets["f1"], 5) for name, mets in comparison})
-        return
+    return {"roc_auc": roc_auc, "pr_auc": pr_auc}
 
-    # Single-model path
-    grid = build_param_grid(args, args.model)
-    best_params, best_metrics, all_results = grid_search(args.model, data.X_train, data.y_train, grid, args.k_folds, args.seed)
-    rng = get_rng(args.seed)
-    w_best, _ = fit_model(args.model, data.X_train, data.y_train, best_params, rng)
-    scores_tr = predict_scores(args.model, data.X_train, w_best)
-    is_prob = args.model in {"logistic", "reg_logistic"}
-    thr = optimal_threshold_by_f1(data.y_train, scores_tr, is_prob)
-    y_pred_tr = np.where(scores_tr >= thr, 1, -1)
-    final_metrics = {
-        "acc": accuracy(data.y_train, y_pred_tr),
-        "precision": precision_recall_f1(data.y_train, y_pred_tr)[0],
-        "recall": precision_recall_f1(data.y_train, y_pred_tr)[1],
-        "f1": precision_recall_f1(data.y_train, y_pred_tr)[2],
-        "log_loss": log_loss_from_probs(data.y_train, scores_tr) if is_prob else float('nan'),
+
+def main():
+    """CLI entrypoint to train and evaluate logistic models on preprocessed data."""
+    parser = argparse.ArgumentParser(description="Train logistic models on preprocessed data")
+    parser.add_argument("--data_dir", type=str, default=None, help="Folder with x_train.csv,y_train.csv,x_test.csv. Overrides config.json if set.")
+    parser.add_argument("--config", type=str, default="config.json", help="Path to config.json")
+    parser.add_argument("--model", type=str, default=None, choices=["logistic","reg_logistic"], help="Model to train. Overrides config.json if set.")
+    parser.add_argument("--k", type=int, default=None, help="K folds; overrides config.json")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--gamma", type=float, default=0.1, help="Learning rate for GD/SGD/logistic")
+    parser.add_argument("--lambda_", type=float, default=1e-3, help="Regularization strength for ridge/reg_logistic")
+    parser.add_argument("--max_iters", type=int, default=1000, help="Max iterations for iterative methods")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Classification threshold for logistic models")
+    # Grid-search options
+    parser.add_argument("--metric", type=str, default="f1", choices=["f1","accuracy","roc_auc","pr_auc","precision","recall"], help="Selection metric for grid search")
+    parser.add_argument("--gamma_grid", type=str, default=None, help="Comma-separated gamma values for search")
+    parser.add_argument("--lambda_grid", type=str, default=None, help="Comma-separated lambda values for search")
+    parser.add_argument("--threshold_grid", type=str, default=None, help="Comma-separated threshold values for search")
+    parser.add_argument("--max_iters_grid", type=str, default=None, help="Comma-separated max_iters values for search")
+    parser.add_argument("--search_max_iters_grid", type=str, default=None, help="Comma-separated max_iters for SEARCH (overrides max_iters_grid during CV)")
+    parser.add_argument("--final_max_iters", type=int, default=None, help="Max iterations for FINAL training only (overrides best from search)")
+    parser.add_argument("--results_dir", type=str, default=None, help="Output directory base; overrides config.json")
+    parser.add_argument("--tag", type=str, default=None, help="Run tag for naming the results folder")
+    parser.add_argument("--make_submission", action="store_true", help="Write submission CSV using x_test.csv")
+    parser.add_argument("--no_progress", action="store_true", help="Disable tqdm progress bars")
+    parser.add_argument("--verbose", action="store_true", help="Verbose prints during search/training")
+    parser.add_argument("--raw_dataset_dir", type=str, default="dataset", help="Path to raw dataset to fetch test_ids for submission")
+    parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers for grid search (1 = no parallelism)")
+    parser.add_argument("--cv_n_jobs", type=int, default=1, help="Parallel workers for cross-validation folds (batch-CV)")
+    args = parser.parse_args()
+
+    # Load config
+    cfg = {}
+    if os.path.exists(args.config):
+        with open(args.config, "r") as f:
+            cfg = json.load(f)
+
+    data_dir = args.data_dir or cfg.get("data_dir", "preprocessed/level0")
+    model = args.model or cfg.get("model", "logistic")
+    # support both k_folds and k in config
+    k = args.k or int(cfg.get("k_folds", cfg.get("k", 5)))
+    seed = args.seed if args.seed is not None else int(cfg.get("seed", 1))
+    results_root = args.results_dir or cfg.get("results_dir", "results")
+    tag = args.tag or cfg.get("tag", model)
+    os.makedirs(results_root, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(results_root, f"{model}_{tag}_{ts}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Configure progress flag
+    args.progress = not args.no_progress
+
+    # Merge parallelism settings from config if provided
+    if args.n_jobs == 1 and "n_jobs" in cfg:
+        try:
+            args.n_jobs = int(cfg["n_jobs"])
+        except Exception:
+            pass
+    if getattr(args, "cv_n_jobs", 1) == 1 and "cv_n_jobs" in cfg:
+        try:
+            args.cv_n_jobs = int(cfg["cv_n_jobs"])
+        except Exception:
+            pass
+    
+
+
+    print("Started Loading")
+    # Load data: always use preprocessed matrices; fetch test_ids from raw dataset
+    X, y_sign, Xtest = load_preprocessed(data_dir)
+    try:
+        # prefer raw_dataset_dir from config if provided
+        raw_dir = cfg.get("raw_dataset_dir", args.raw_dataset_dir)
+        _, _, _, _, test_ids = load_csv_data(raw_dir)
+    except Exception:
+        # Safe fallback if raw dataset not available
+        test_ids = np.arange(1, Xtest.shape[0] + 1)
+    y_sign = y_sign.astype(int)
+    print(f"Loaded {X.shape} train, {Xtest.shape} test from {data_dir}")
+
+    def parse_grid(opt, cast=float):
+        if opt is None:
+            return None
+        vals = [s.strip() for s in opt.split(",") if s.strip()]
+        return [cast(v) for v in vals]
+
+    # Allow metric and grids from config when CLI flags not provided
+    if "metric" in cfg and (not hasattr(args, "metric") or args.metric == "f1"):
+        args.metric = cfg["metric"]
+    gamma_grid = parse_grid(args.gamma_grid if args.gamma_grid is not None else cfg.get("gamma_grid"), float)
+    lambda_grid = parse_grid(args.lambda_grid if args.lambda_grid is not None else cfg.get("lambda_grid"), float)
+    threshold_grid = parse_grid(args.threshold_grid if args.threshold_grid is not None else cfg.get("threshold_grid"), float)
+    max_iters_grid = parse_grid(args.max_iters_grid if args.max_iters_grid is not None else cfg.get("max_iters_grid"), int)
+    search_max_iters_grid = parse_grid(args.search_max_iters_grid if args.search_max_iters_grid is not None else cfg.get("search_max_iters_grid"), int)
+    final_max_iters = args.final_max_iters if args.final_max_iters is not None else cfg.get("final_max_iters")
+
+    best = None
+    searched = False
+    # prefer dedicated search grid for iterations if provided
+    iters_list = search_max_iters_grid or max_iters_grid or [args.max_iters]
+
+    if any(v is not None for v in [gamma_grid, lambda_grid, threshold_grid, iters_list]):
+        searched = True
+        gammas = gamma_grid or [args.gamma]
+        lambdas = lambda_grid or [args.lambda_]
+        thresholds = threshold_grid or [args.threshold]
+        # iters_list already set above
+
+        print("Starting grid search...")
+        total = len(gammas) * len(lambdas) * len(thresholds) * len(iters_list)
+        # prepare list for stable ordering in tqdm
+        combos = [(g, lmb, thr, iters) for g in gammas for lmb in lambdas for thr in thresholds for iters in iters_list]
+
+        def eval_combo(params):
+            g, lmb, thr, iters = params
+            # clone args with overrides to avoid race conditions
+            class A: pass
+            a = A()
+            a.gamma = g
+            a.lambda_ = lmb
+            a.threshold = thr
+            a.max_iters = iters
+            a.progress = False
+            a.cv_n_jobs = 1
+            # other needed fields
+            a.metric = args.metric
+            return params, cross_validate(model, X, y_sign, k=k, seed=seed, args=a)[0]
+
+        if args.n_jobs and args.n_jobs > 1:
+            print("grid search parallel")
+            with ThreadPoolExecutor(max_workers=args.n_jobs) as ex:
+                futures = [ex.submit(eval_combo, p) for p in combos]
+                it = futures
+                if args.progress:
+                    it = tqdm(as_completed(futures), total=total, desc="Grid search", leave=False)
+                for fut in it:
+                    if args.progress:
+                        params, agg_res = fut.result()
+                    else:
+                        params, agg_res = fut.result()
+                    g, lmb, thr, iters = params
+                    score = agg_res[args.metric]
+                    cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "metric": args.metric, "score": float(score), "cv": agg_res}
+                    if (best is None) or (score > best["score"]):
+                        best = cand
+                        if args.verbose:
+                            print(f"New best {args.metric}={score:.4f} with {cand}")
+        else:
+            iterator = combos
+            if args.progress:
+                iterator = tqdm(combos, total=total, desc="Grid search", leave=False)
+            for g, lmb, thr, iters in iterator:
+                a = argparse.Namespace(gamma=g, lambda_=lmb, threshold=thr, max_iters=iters, progress=False, metric=args.metric, cv_n_jobs=args.cv_n_jobs)
+                agg_res, _, _ = cross_validate(model, X, y_sign, k=k, seed=seed, args=a)
+                score = agg_res[args.metric]
+                cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "metric": args.metric, "score": float(score), "cv": agg_res}
+                if (best is None) or (score > best["score"]):
+                    best = cand
+                    if args.verbose:
+                        print(f"New best {args.metric}={score:.4f} with {cand}")
+        # set best params back to args
+        args.gamma = best["gamma"]
+        args.lambda_ = best["lambda_"]
+        args.threshold = best["threshold"]
+        # set final training iterations: prefer explicit final_max_iters, else best from search
+        args.max_iters = int(final_max_iters) if final_max_iters is not None else best["max_iters"]
+        print(f"Best by {args.metric}: {best}")
+
+    # CV with final params (either searched best or provided)
+    agg, per_fold, losses = cross_validate(model, X, y_sign, k=k, seed=seed, args=args)
+    print({k: round(v, 4) if isinstance(v, float) else v for k, v in agg.items()})
+
+    # Train on full train set with final params
+    w, train_loss = train_once(model, X, y_sign, args)
+
+    # Train-set curves (using train predictions)
+    scores_train = predict_scores(X, w)
+    aucs = plot_curves(scores_train, y_sign, out_dir, prefix=f"{model}_train")
+
+    # Save summary
+    summary = {
+        "data_dir": data_dir,
+        "model": model,
+        "k_folds": k,
+        "seed": seed,
+        "params": {
+            "gamma": args.gamma,
+            "lambda_": args.lambda_,
+            "max_iters": args.max_iters,
+            "threshold": args.threshold,
+        },
+        "cv": {
+            "aggregate": agg,
+            "per_fold": per_fold,
+            "losses": losses,
+        },
+        "train": {
+            "loss": float(train_loss),
+            "roc_auc": aucs.get("roc_auc"),
+            "pr_auc": aucs.get("pr_auc"),
+        },
     }
-    if not args.no_plots:
-        aucs = plot_roc_pr(data.y_train, scores_tr, os.path.join(out_dir, "train"))
-        final_metrics.update(aucs)
-
-    meta = {"model": args.model, "best_params": best_params, "cv_best_metrics": best_metrics, "threshold": float(thr), "final_train_metrics": final_metrics, "use_preprocessed": bool(args.use_preprocessed), "oversample": args.oversample, "k_folds": int(args.k_folds), "seed": int(args.seed), "cont_features": list(args.cont_features) if args.cont_features is not None else None, "preprocess_report_keys": list(data.preprocess_report.keys()) if data.preprocess_report is not None else None, "n_train": int(data.X_train.shape[0]), "n_features": int(data.X_train.shape[1])}
+    if searched and best is not None:
+        summary["best_search"] = best
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
-        json.dump(round_floats(meta, 5), f, indent=2)
-    with open(os.path.join(out_dir, "cv_results.json"), "w") as f:
-        json.dump(round_floats(all_results, 5), f, indent=2)
+        json.dump(summary, f, indent=2)
 
-    if args.make_submission:
-        scores_te = predict_scores(args.model, data.X_test, w_best)
-        y_pred_te = np.where(scores_te >= thr, 1, -1).astype(int)
-        sub_path = os.path.join(out_dir, f"submission_{args.model}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-        create_csv_submission(data.test_ids, y_pred_te, sub_path)
-        print("[Submit] Wrote:", sub_path)
+    # Optional submission
+    if args.make_submission or cfg.get("make_submission", False):
+        test_scores = predict_scores(Xtest, w)
+        ypred_sign = to_sign(test_scores, threshold=args.threshold)
+        sub_path = os.path.join(out_dir, "submission.csv")
+        create_csv_submission(test_ids, ypred_sign, sub_path)
+        print(f"Wrote submission: {sub_path}")
 
-    print("\n[Done] Best params:", best_params)
-    print("[Done] CV (avg):", {k: ("{:.5f}".format(v) if isinstance(v, float) and not np.isnan(v) else v) for k, v in best_metrics.items()})
-    print("[Done] Final train:", {k: ("{:.5f}".format(v) if isinstance(v, float) and not np.isnan(v) else v) for k, v in final_metrics.items()})
+    print(f"Results saved to {out_dir}")
 
 
 if __name__ == "__main__":
     main()
-
-

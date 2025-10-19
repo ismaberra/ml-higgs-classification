@@ -1,20 +1,21 @@
 {
-    "data_dir": "/preprocessed/level2",
-    "use_preprocessed": false,
-  
-    "model": "logistic",
-    "k": 5,
-    "seed": 1,
+  "data_dir": "/Users/berra/Desktop/bureau/EPFL/MA1/ML/project-1-ml212/dataset_clean",
+  "use_preprocessed": false,
 
-    "gamma_grid": "0.01,0.02,0.05,0.1",
-    "threshold_grid": "0.4,0.5,0.6",
-    "search_max_iters_grid": "600",
-    "final_max_iters": 3000,
+  "model": "logistic",
+  "k": 5,
+  "seed": 1,
 
-    "results_dir": "results",
-    "tag": "level2_logreg",
-    "make_submission": true,
-    "raw_dataset_dir": "/dataset",
-    "n_jobs": 1,
-    "cv_n_jobs": 6
-  }
+  "metric": "pr_auc",
+  "gamma_grid": "0.01,0.02,0.05,0.1",
+  "search_max_iters_grid": "300,600",
+  "final_max_iters": 3000,
+
+  "results_dir": "results",
+  "tag": "level5",
+  "make_submission": true,
+  "raw_dataset_dir": "/Users/berra/Desktop/bureau/EPFL/MA1/ML/project-1-ml212/dataset",
+  "n_jobs": 6,
+  "cv_n_jobs": 6
+}
+

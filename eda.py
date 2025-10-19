@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import itertools as combinations
+from collections import defaultdict
+
 
 
 def dataset_overview(x, y):
@@ -152,14 +154,14 @@ def extreme_scale_features(stds, low_thresh=1e-6, high_thresh=1e3):
     return small, large
 
 def plot_feature_distribution(x, feat_idx, bins=30):
-    col = x[:, feat_idx]
+    col = x[:, feat_idx - 1]
     plt.hist(col[~np.isnan(col)], bins=bins, color="steelblue", edgecolor="black")
     plt.title(f"Feature {feat_idx} distribution")
     plt.xlabel("Value")
     plt.ylabel("Frequency")
     plt.show()
 
-"""
+
 def detect_feature_types(x, threshold=20):
     categorical, continuous = [], []
     for j in range(x.shape[1]):
@@ -169,9 +171,7 @@ def detect_feature_types(x, threshold=20):
         else:
             continuous.append(j)
     return categorical, continuous
-"""
 
-import numpy as np
 
 def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
     """
@@ -197,7 +197,7 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
         Lists of feature indices for each detected type.
     """
 
-    categorical, continuous, binary = [], [], []
+    categorical, continuous, binary, ignored = [], [], [], []
     n_features = x.shape[1]
 
     for j in range(n_features):
@@ -208,6 +208,7 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
 
         # Skip features that are almost entirely missing
         if n_unique == 0 or nan_ratio > nan_ratio_limit:
+            ignored.append(j)
             continue
 
         unique_vals = np.unique(col_nonan)
@@ -219,7 +220,7 @@ def detect_feature_types_refined(x, threshold_cat=15, nan_ratio_limit=0.95):
             continue
 
         # Pseudo-binary (only one value + many NaN)
-        if n_unique == 1 and nan_ratio > 0.2:
+        if n_unique == 1 and nan_ratio > (0.5 + 0.1 * np.log1p(len(col))):
             binary.append(j)
             continue
 
@@ -619,3 +620,279 @@ def find_suspicious_features(x_train, y_train, corr_threshold=0.3):
             suspicious.append((j, "Large range (maybe date/ID)", value_range))
 
     return suspicious
+
+
+
+
+
+def clean_survey_codes(x, feature_names=None, verbose=True):
+    """
+    Remove survey codes using the following logic:
+      1. If the value has more than 3 digits and consists only of 7, 8, or 9 → NaN
+      2. For suspected codes (7, 8, 9, 77, 88, 99), compute distance to the closest
+         normal value. If this distance is >= 2 × the mean distance between normal values → NaN
+    """
+
+    x_clean = np.copy(x)
+    if x_clean.ndim == 1:
+        x_clean = x_clean.reshape(-1, 1)
+
+    n_samples, n_features = x_clean.shape
+    replaced_log = {}
+    suspect_vals = np.array([7, 8, 9, 77, 88, 99])
+
+    for j in range(n_features):
+        col = x_clean[:, j]
+        valid_mask = ~np.isnan(col)
+        unique_vals = np.unique(col[valid_mask])
+        to_remove = []
+
+        # --- Rule 1: remove repeated-digit codes with >=3 digits ---
+        for v in unique_vals:
+            s = str(int(v))
+            if len(s) >= 3 and len(set(s)) == 1 and s[0] in {"7", "8", "9"}:
+                to_remove.append(v)
+
+        # --- Rule 2: detect isolated suspected codes adaptively and sequentially ---
+        is_suspect = np.isin(unique_vals, suspect_vals)
+        suspect_in_data = np.sort(unique_vals[is_suspect])
+        normal_vals = np.sort(unique_vals[~is_suspect])
+
+        if normal_vals.size >= 2 and suspect_in_data.size > 0:
+            mean_dist = np.mean(np.diff(normal_vals))
+            remove_rest = False  # once a code is detected, all following are codes
+
+            for v in suspect_in_data:
+                if remove_rest:
+                    # once one suspect is marked as code, all following are codes
+                    to_remove.append(v)
+                    continue
+
+                # compute distance to closest normal value
+                d = np.min(np.abs(normal_vals - v))
+
+                if d < 2 * mean_dist:
+                    # close → treat as normal, include and re-compute
+                    normal_vals = np.sort(np.append(normal_vals, v))
+                    mean_dist = np.mean(np.diff(normal_vals))
+                else:
+                    # far → mark as code, and mark all next suspects as codes
+                    to_remove.append(v)
+                    remove_rest = True
+
+        # --- Apply replacements ---
+        if to_remove:
+            mask = np.isin(col, to_remove)
+            col[mask] = np.nan
+            x_clean[:, j] = col
+            replaced_log[j if feature_names is None else feature_names[j]] = sorted(set(to_remove))
+
+    # --- Log summary ---
+    if verbose and replaced_log:
+        print("Removed survey codes:")
+        for k, v in replaced_log.items():
+            print(f"  {k}: {v}")
+
+    return x_clean
+
+
+
+def detect_hierarchical_dependencies(x, feature_names, threshold=0.995, verbose=True):
+    """
+    Detect hierarchical dependencies between survey features.
+
+    Logic:
+    - Compare all feature pairs (A, B) with A appearing before B.
+    - If >97% of non-NaN entries in B occur only when A is non-NaN (presence-based),
+      OR only when A takes a specific value v (value-based),
+      then B is said to depend on A.
+    - Build hierarchical groups (A → B → C) from dependencies.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Data matrix (rows = samples, cols = features)
+    feature_names : list of str
+        Feature names corresponding to the columns of x
+    threshold : float
+        Dependency ratio threshold (default 0.97)
+    verbose : bool
+        If True, prints dependency summary
+
+    Returns
+    -------
+    groups : list[list[str]]
+        Hierarchical dependency groups
+    dependencies : list[tuple[str, str, str, str, float]]
+        Detailed dependencies as (A, type, value, B, ratio)
+    """
+    n_features = x.shape[1]
+    dependencies = []
+    dep_map = defaultdict(set)
+
+    for i in range(n_features):
+        A = x[:, i]
+        mask_A = ~np.isnan(A)
+        if np.sum(mask_A) == 0:
+            continue
+        unique_A = np.unique(A[mask_A])
+
+        for j in range(i + 1, n_features):  # only forward direction
+            B = x[:, j]
+            mask_B = ~np.isnan(B)
+            if np.sum(mask_B) == 0:
+                continue
+
+            # --- Presence-based dependency ---
+            p_B_given_A = np.mean(mask_B[mask_A]) if np.sum(mask_A) > 0 else 0
+            p_B_given_notA = np.mean(mask_B[~mask_A]) if np.sum(~mask_A) > 0 else 0
+
+            if p_B_given_A >= threshold and p_B_given_notA < (1 - threshold):
+                dependencies.append((feature_names[i], "presence", None,
+                                     feature_names[j], round(p_B_given_A, 3)))
+                dep_map[feature_names[i]].add(feature_names[j])
+                continue  # no need to test value-based if presence suffices
+
+            # --- Value-based dependency ---
+            for val in unique_A:
+                mask_A_val = mask_A & (A == val)
+                if np.sum(mask_A_val) == 0:
+                    continue
+
+                p_B_given_Aval = np.mean(mask_B[mask_A_val]) if np.sum(mask_A_val) > 0 else 0
+                p_B_given_other = np.mean(mask_B[mask_A & (A != val)]) if np.sum(mask_A & (A != val)) > 0 else 0
+
+                if p_B_given_Aval >= threshold and p_B_given_other < (1 - threshold):
+                    dependencies.append((feature_names[i], "value", val,
+                                         feature_names[j], round(p_B_given_Aval, 3)))
+                    dep_map[feature_names[i]].add(feature_names[j])
+                    break
+
+    # --- Build hierarchical groups safely ---
+    visited = set()
+    groups = []
+
+    def dfs(node, chain):
+        visited.add(node)
+        chain.append(node)
+        for child in dep_map.get(node, []):
+            if child not in visited:
+                dfs(child, chain)
+
+    # iterate over a fixed list of keys to avoid runtime error
+    for root in list(dep_map.keys()):
+        if root not in visited:
+            chain = []
+            dfs(root, chain)
+            if len(chain) > 1:
+                groups.append(chain)
+
+
+    # --- Verbose summary ---
+    if verbose:
+        print(f"Detected {len(dependencies)} dependencies.")
+        for A, dtype, val, B, ratio in dependencies:
+            if dtype == "presence":
+                print(f"{B} depends on {A} (presence-based, ratio={ratio})")
+            else:
+                print(f"{B} depends on {A}=={val} (value-based, ratio={ratio})")
+        print(f"\nIdentified {len(groups)} hierarchical groups:")
+        for g in groups:
+            print("  → ".join(g))
+
+    return groups, dependencies
+
+
+
+import numpy as np
+
+def process_dependency_groups(x, feature_names, groups, verbose=True):
+    """
+    Process dependency groups to prepare for model training and one-hot encoding.
+
+    Steps:
+      1. Remove constant features within groups (1 unique non-NaN value)
+      2. Merge connected groups (avoid duplicate dependencies)
+      3. Build encoding plan: root → dependent features
+      4. Optionally print details if verbose=True
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Dataset as (samples × features)
+    feature_names : list of str
+        Names of all features in the same column order as x
+    groups : list[list[str]]
+        Dependency groups (each list is ordered root → child → ...)
+    verbose : bool
+        If True, print progress and results
+
+    Returns
+    -------
+    cleaned_groups : list[list[str]]
+        Optimized dependency groups
+    to_remove : list[str]
+        Constant or useless features to drop
+    encoding_plan : dict
+        Mapping of root features → dependent features
+    """
+    name_to_idx = {name: i for i, name in enumerate(feature_names)}
+    to_remove = []
+    cleaned_groups = []
+    seen = set()
+
+    # --- Step 1: remove constant features within groups ---
+    for g in groups:
+        valid_feats = []
+        for feat in g:
+            idx = name_to_idx.get(feat)
+            if idx is None:
+                continue
+            col = x[:, idx]
+            vals = col[~np.isnan(col)]
+            uniq = np.unique(vals)
+            if len(uniq) <= 1:
+                to_remove.append(feat)
+            else:
+                valid_feats.append(feat)
+        if len(valid_feats) > 1:
+            cleaned_groups.append(valid_feats)
+
+    # --- Step 2: merge connected groups ---
+    merged = []
+    for g in cleaned_groups:
+        if any(feat in seen for feat in g):
+            continue
+        connected = set(g)
+        changed = True
+        while changed:
+            changed = False
+            for h in cleaned_groups:
+                if connected.intersection(h):
+                    new_size = len(connected)
+                    connected.update(h)
+                    if len(connected) != new_size:
+                        changed = True
+        merged.append(sorted(connected))
+        seen.update(connected)
+    cleaned_groups = merged
+
+    # --- Step 3: build encoding plan (root → dependents) ---
+    encoding_plan = {}
+    for g in cleaned_groups:
+        root = g[0]
+        children = g[1:]
+        encoding_plan[root] = children
+
+    # --- Step 4: verbose logging ---
+    if verbose:
+        print(f"\n=== Dependency Group Processing Summary ===")
+        print(f"Removed {len(to_remove)} constant features:")
+        if to_remove:
+            print("  " + ", ".join(to_remove))
+        print(f"\nOptimized to {len(cleaned_groups)} dependency groups:")
+        for g in cleaned_groups:
+            print("  " + " → ".join(g))
+        print(f"\nEncoding plan created for {len(encoding_plan)} root features.\n")
+
+    return cleaned_groups, to_remove, encoding_plan

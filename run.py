@@ -3,13 +3,17 @@ import json
 import os
 import time
 from datetime import datetime
+
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from implementations import (
     logistic_regression,
     reg_logistic_regression,
+    _logistic_gradient,
+    _logistic_loss,
 )
 from helpers import create_csv_submission, load_csv_data
 
@@ -140,6 +144,46 @@ def kfold_indices(n_samples, k, seed=1, y=None):
     return folds
 
 
+def train_once_with_early_stopping(model, X, y_sign, args):
+    """Train with early stopping by monitoring loss during iterations."""
+    n_features = X.shape[1]
+    init_w = np.zeros(n_features)
+    y01 = to01(y_sign)
+    
+    # Early stopping parameters
+    tol = getattr(args, 'early_stopping_tol', 1e-6)
+    patience = getattr(args, 'early_stopping_patience', 10)
+    
+    w = init_w.copy()
+    prev_loss = float('inf')
+    patience_counter = 0
+    
+    for i in range(args.max_iters):
+        # Manual gradient step (replicating implementations.py logic)
+        if model == "logistic":
+            grad = _logistic_gradient(y01, X, w)
+        elif model == "reg_logistic":
+            grad = _logistic_gradient(y01, X, w) + 2.0 * args.lambda_ * w
+        else:
+            raise ValueError(f"Unknown model: {model}")
+        
+        w -= args.gamma * grad
+        
+        # Early stopping check every 10 iterations
+        if i % 10 == 0:
+            current_loss = _logistic_loss(y01, X, w)
+            if abs(prev_loss - current_loss) < tol:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+            prev_loss = current_loss
+    
+    loss = _logistic_loss(y01, X, w)
+    return w, float(loss)
+
+
 def train_once(model, X, y_sign, args):
     """Train a single logistic-family model on the provided data.
 
@@ -152,6 +196,11 @@ def train_once(model, X, y_sign, args):
     Returns:
         Tuple `(w, loss)` with learned weights and data loss.
     """
+    # Use early stopping if enabled
+    if not getattr(args, 'no_early_stopping', False):
+        return train_once_with_early_stopping(model, X, y_sign, args)
+    
+    # Fallback to original implementations
     n_features = X.shape[1]
     init_w = np.zeros(n_features)
     y01 = to01(y_sign)
@@ -165,6 +214,38 @@ def train_once(model, X, y_sign, args):
     return w, float(loss)
 
 
+def eval_fold_cv(i, folds, X, y_sign, model, args, k):
+    """Evaluate a single CV fold - moved outside for ProcessPoolExecutor pickling."""
+    val_idx = folds[i]
+    train_idx = np.concatenate([folds[j] for j in range(k) if j != i])
+    Xtr, ytr = X[train_idx], y_sign[train_idx]
+    Xva, yva = X[val_idx], y_sign[val_idx]
+
+    w, loss = train_once(model, Xtr, ytr, args)
+    scores = predict_scores(Xva, w)
+    yhat = to_sign(scores, threshold=args.threshold)
+    metrics = compute_metrics(yva, yhat)
+    roc_auc, pr_auc = compute_auc(scores, yva)
+    return loss, metrics, roc_auc, pr_auc
+
+
+def eval_combo_grid(params, model, X, y_sign, k, seed, metric):
+    """Evaluate a single grid search combination - moved outside for ProcessPoolExecutor pickling."""
+    g, lmb, thr, iters = params
+    # clone args with overrides to avoid race conditions
+    class A: pass
+    a = A()
+    a.gamma = g
+    a.lambda_ = lmb
+    a.threshold = thr
+    a.max_iters = iters
+    a.progress = False
+    a.cv_n_jobs = 1
+    # other needed fields
+    a.metric = metric
+    return params, cross_validate(model, X, y_sign, k=k, seed=seed, args=a)[0]
+
+
 def cross_validate(model, X, y_sign, k, seed, args):
     """Perform K-fold cross-validation for logistic-family models.
 
@@ -175,23 +256,12 @@ def cross_validate(model, X, y_sign, k, seed, args):
     fold_losses = []
     fold_roc_aucs = []
     fold_pr_aucs = []
-    def eval_fold(i):
-        val_idx = folds[i]
-        train_idx = np.concatenate([folds[j] for j in range(k) if j != i])
-        Xtr, ytr = X[train_idx], y_sign[train_idx]
-        Xva, yva = X[val_idx], y_sign[val_idx]
-
-        w, loss = train_once(model, Xtr, ytr, args)
-        scores = predict_scores(Xva, w)
-        yhat = to_sign(scores, threshold=args.threshold)
-        metrics = compute_metrics(yva, yhat)
-        roc_auc, pr_auc = compute_auc(scores, yva)
-        return loss, metrics, roc_auc, pr_auc
 
     cv_jobs = getattr(args, "cv_n_jobs", 1)
     if cv_jobs > 1:
-        with ThreadPoolExecutor(max_workers=cv_jobs) as ex:
-            futures = [ex.submit(eval_fold, i) for i in range(k)]
+        print(f"CV parallel using ProcessPoolExecutor with {cv_jobs} workers")
+        with ProcessPoolExecutor(max_workers=cv_jobs) as ex:
+            futures = [ex.submit(eval_fold_cv, i, folds, X, y_sign, model, args, k) for i in range(k)]
             it = futures
             if getattr(args, "progress", True):
                 it = tqdm(as_completed(futures), total=k, desc="CV folds", leave=False)
@@ -213,7 +283,7 @@ def cross_validate(model, X, y_sign, k, seed, args):
         if getattr(args, "progress", True):
             fold_iter = tqdm(fold_iter, desc="CV folds", leave=False)
         for i in fold_iter:
-            loss, metrics, roc_auc, pr_auc = eval_fold(i)
+            loss, metrics, roc_auc, pr_auc = eval_fold_cv(i, folds, X, y_sign, model, args, k)
             fold_losses.append(loss)
             fold_metrics.append(metrics)
             fold_roc_aucs.append(roc_auc)
@@ -310,6 +380,9 @@ def main():
     parser.add_argument("--raw_dataset_dir", type=str, default="dataset", help="Path to raw dataset to fetch test_ids for submission")
     parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers for grid search (1 = no parallelism)")
     parser.add_argument("--cv_n_jobs", type=int, default=1, help="Parallel workers for cross-validation folds (batch-CV)")
+    parser.add_argument("--early_stopping_tol", type=float, default=1e-6, help="Tolerance for early stopping (loss change threshold)")
+    parser.add_argument("--early_stopping_patience", type=int, default=10, help="Patience for early stopping (iterations to wait)")
+    parser.add_argument("--no_early_stopping", action="store_true", help="Disable early stopping (use original implementations)")
     args = parser.parse_args()
 
     # Load config
@@ -333,6 +406,9 @@ def main():
 
     # Configure progress flag
     args.progress = not args.no_progress
+
+    # Store original cv_n_jobs for later restoration after grid search
+    args.original_cv_n_jobs = getattr(args, 'cv_n_jobs', 1)
 
     # Merge parallelism settings from config if provided
     if args.n_jobs == 1 and "n_jobs" in cfg:
@@ -380,7 +456,7 @@ def main():
     best = None
     searched = False
     # prefer dedicated search grid for iterations if provided
-    iters_list = search_max_iters_grid or max_iters_grid or [args.max_iters]
+    iters_list = search_max_iters_grid or max_iters_grid 
 
     if any(v is not None for v in [gamma_grid, lambda_grid, threshold_grid, iters_list]):
         searched = True
@@ -394,25 +470,10 @@ def main():
         # prepare list for stable ordering in tqdm
         combos = [(g, lmb, thr, iters) for g in gammas for lmb in lambdas for thr in thresholds for iters in iters_list]
 
-        def eval_combo(params):
-            g, lmb, thr, iters = params
-            # clone args with overrides to avoid race conditions
-            class A: pass
-            a = A()
-            a.gamma = g
-            a.lambda_ = lmb
-            a.threshold = thr
-            a.max_iters = iters
-            a.progress = False
-            a.cv_n_jobs = 1
-            # other needed fields
-            a.metric = args.metric
-            return params, cross_validate(model, X, y_sign, k=k, seed=seed, args=a)[0]
-
         if args.n_jobs and args.n_jobs > 1:
-            print("grid search parallel")
-            with ThreadPoolExecutor(max_workers=args.n_jobs) as ex:
-                futures = [ex.submit(eval_combo, p) for p in combos]
+            print(f"Grid search parallel using ProcessPoolExecutor with {args.n_jobs} workers")
+            with ProcessPoolExecutor(max_workers=args.n_jobs) as ex:
+                futures = [ex.submit(eval_combo_grid, p, model, X, y_sign, k, seed, args.metric) for p in combos]
                 it = futures
                 if args.progress:
                     it = tqdm(as_completed(futures), total=total, desc="Grid search", leave=False)
@@ -450,12 +511,50 @@ def main():
         print(f"Best by {args.metric}: {best}")
 
     # CV with final params (either searched best or provided)
+    # Restore original cv_n_jobs for parallel CV after grid search
+    original_cv_n_jobs = getattr(args, 'original_cv_n_jobs', 1)
+    args.cv_n_jobs = original_cv_n_jobs
     agg, per_fold, losses = cross_validate(model, X, y_sign, k=k, seed=seed, args=args)
     print({k: round(v, 4) if isinstance(v, float) else v for k, v in agg.items()})
 
     # Train on full train set with final params
     w, train_loss = train_once(model, X, y_sign, args)
 
+
+    # COMMENTED OUT: Post-training threshold selection to prevent overfitting
+    # This section was causing overfitting because:
+    # 1. Target encoding already uses target information during preprocessing
+    # 2. Threshold selection uses target information again
+    # 3. This creates double information leakage and inflated validation scores
+    # 
+    # if args.metric in ["pr_auc", "roc_auc"]:
+    #     print("Selecting optimal threshold on validation split...")
+    #     from sklearn.model_selection import train_test_split
+    #     X_train_final, X_val, y_train_final, y_val = train_test_split(
+    #         X, y_sign, test_size=0.2, random_state=seed, stratify=y_sign
+    #     )
+    #     
+    #     # Retrain on train_final
+    #     w_final, _ = train_once(model, X_train_final, y_train_final, args)
+    #     
+    #     # Find best threshold on validation
+    #     val_scores = predict_scores(X_val, w_final)
+    #     best_threshold = 0.5
+    #     best_f1 = 0
+    #     
+    #     for thresh in np.arange(0.1, 0.9, 0.05):
+    #         yhat = to_sign(val_scores, threshold=thresh)
+    #         metrics = compute_metrics(y_val, yhat)
+    #         if metrics["f1"] > best_f1:
+    #             best_f1 = metrics["f1"]
+    #             best_threshold = thresh
+    #     
+    #     args.threshold = best_threshold
+    #     print(f"Selected threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    #     
+    #     # Retrain on full dataset with selected threshold
+    #     w, train_loss = train_once(model, X, y_sign, args)
+    
     # Train-set curves (using train predictions)
     scores_train = predict_scores(X, w)
     aucs = plot_curves(scores_train, y_sign, out_dir, prefix=f"{model}_train")
@@ -501,3 +600,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

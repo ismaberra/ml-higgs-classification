@@ -1,5 +1,3 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/UcP9Py08)
-
 ## Project Overview
 
 This repository contains a complete ML pipeline for a binary, highly imbalanced classification task. It includes:
@@ -130,6 +128,13 @@ Tips for Apple Silicon (M1/M2):
 - Set `seed` in `config.json` or via CLI.
 - Folds are stratified by label.
 
+
+## Troubleshooting
+
+- If the process appears “stuck” during grid search: ensure `n_jobs` and `cv_n_jobs` are set, and confirm functions used in parallel are top-level (already handled in `run.py`).
+- If predictions seem to use threshold 0.5: verify `threshold` in `config.json`. `run.py` now merges config values early so they are respected throughout CV and submission.
+
+
 ## Repository Structure
 
 - `preprocessing.py`: defines levels, fits state, and writes preprocessed matrices
@@ -138,6 +143,3 @@ Tips for Apple Silicon (M1/M2):
 - `new_implementations.py`: optimized Random Forest and weighted logistic variants
 - `helpers.py`: IO utilities
 - `config.json`: main configuration for runs
-- `eda.py`: helper functions for the exploratory data analysis
-- `eda.ipynb`: Exploratory Data Analysis
-- `report.pdf`: final report of the project

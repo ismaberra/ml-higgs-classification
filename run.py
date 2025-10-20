@@ -29,9 +29,15 @@ def load_preprocessed(data_dir):
     Expects `x_train.csv`, `y_train.csv`, `x_test.csv` in `data_dir`.
     Returns `X, y, Xtest`.
     """
-    x_train = np.loadtxt(os.path.join(data_dir, "x_train.csv"), delimiter=",", dtype=np.float64)
-    y_train = np.loadtxt(os.path.join(data_dir, "y_train.csv"), delimiter=",", dtype=np.float64)
-    x_test = np.loadtxt(os.path.join(data_dir, "x_test.csv"), delimiter=",", dtype=np.float64)
+    x_train = np.loadtxt(
+        os.path.join(data_dir, "x_train.csv"), delimiter=",", dtype=np.float64
+    )
+    y_train = np.loadtxt(
+        os.path.join(data_dir, "y_train.csv"), delimiter=",", dtype=np.float64
+    )
+    x_test = np.loadtxt(
+        os.path.join(data_dir, "x_test.csv"), delimiter=",", dtype=np.float64
+    )
     if isinstance(y_train, np.ndarray) and y_train.ndim > 1:
         y_train = y_train.reshape(-1)
     return x_train, y_train, x_test
@@ -83,16 +89,16 @@ def predict_scores(X, model_or_weights):
         # Logistic family models
         scores = X @ model_or_weights
         return sigmoid(scores)
-    
+
     # Tree-based models
-    elif hasattr(model_or_weights, 'predict_proba'):
+    elif hasattr(model_or_weights, "predict_proba"):
         proba = model_or_weights.predict_proba(X)
         if proba.shape[1] == 2:
             return proba[:, 1]  # Return probability of positive class
         else:
             # For binary classification, assume second column is positive class
             return proba[:, -1]
-    
+
     # Fallback: use predict and convert to probabilities
     else:
         predictions = model_or_weights.predict(X)
@@ -171,15 +177,15 @@ def train_once_with_early_stopping(model, X, y_sign, args):
     n_features = X.shape[1]
     init_w = np.zeros(n_features)
     y01 = to01(y_sign)
-    
+
     # Early stopping parameters
-    tol = getattr(args, 'early_stopping_tol', 1e-6)
-    patience = getattr(args, 'early_stopping_patience', 10)
-    
+    tol = getattr(args, "early_stopping_tol", 1e-6)
+    patience = getattr(args, "early_stopping_patience", 10)
+
     w = init_w.copy()
-    prev_loss = float('inf')
+    prev_loss = float("inf")
     patience_counter = 0
-    
+
     for i in range(args.max_iters):
         # Manual gradient step (replicating implementations.py logic)
         if model == "logistic":
@@ -188,7 +194,10 @@ def train_once_with_early_stopping(model, X, y_sign, args):
             grad = _logistic_gradient(y01, X, w) + 2.0 * args.lambda_ * w
         elif model == "logistic_weighted":
             # For weighted models, we need to use the weighted implementations
-            class_weight = {0: getattr(args, 'class_weight_0', 1.0), 1: getattr(args, 'class_weight_1', 1.0)}
+            class_weight = {
+                0: getattr(args, "class_weight_0", 1.0),
+                1: getattr(args, "class_weight_1", 1.0),
+            }
             # Calculate sample weights
             sample_weights = np.ones(len(y01))
             for class_label, weight in class_weight.items():
@@ -201,7 +210,10 @@ def train_once_with_early_stopping(model, X, y_sign, args):
             grad = X.T @ grad / len(y01)
         elif model == "reg_logistic_weighted":
             # For weighted models, we need to use the weighted implementations
-            class_weight = {0: getattr(args, 'class_weight_0', 1.0), 1: getattr(args, 'class_weight_1', 1.0)}
+            class_weight = {
+                0: getattr(args, "class_weight_0", 1.0),
+                1: getattr(args, "class_weight_1", 1.0),
+            }
             # Calculate sample weights
             sample_weights = np.ones(len(y01))
             for class_label, weight in class_weight.items():
@@ -214,9 +226,9 @@ def train_once_with_early_stopping(model, X, y_sign, args):
             grad = X.T @ grad / len(y01) + 2.0 * args.lambda_ * w
         else:
             raise ValueError(f"Unknown model: {model}")
-        
+
         w -= args.gamma * grad
-        
+
         # Early stopping check every 10 iterations
         if i % 10 == 0:
             current_loss = _logistic_loss(y01, X, w)
@@ -227,7 +239,7 @@ def train_once_with_early_stopping(model, X, y_sign, args):
             else:
                 patience_counter = 0
             prev_loss = current_loss
-    
+
     loss = _logistic_loss(y01, X, w)
     return w, float(loss)
 
@@ -245,61 +257,98 @@ def train_once(model, X, y_sign, args):
         Tuple `(model_or_weights, loss)` with learned model/weights and data loss.
     """
     # Get random state for reproducibility
-    random_state = getattr(args, 'seed', None)
-    
+    random_state = getattr(args, "seed", None)
+
     # Use early stopping if enabled for logistic models
-    if model in ["logistic", "reg_logistic", "logistic_weighted", "reg_logistic_weighted"] and not getattr(args, 'no_early_stopping', False):
+    if model in [
+        "logistic",
+        "reg_logistic",
+        "logistic_weighted",
+        "reg_logistic_weighted",
+    ] and not getattr(args, "no_early_stopping", False):
         return train_once_with_early_stopping(model, X, y_sign, args)
-    
+
     # Logistic family models
     if model == "logistic":
         n_features = X.shape[1]
         init_w = np.zeros(n_features)
         y01 = to01(y_sign)
-        w, loss = logistic_regression(y01, X, init_w, max_iters=args.max_iters, gamma=args.gamma)
+        w, loss = logistic_regression(
+            y01, X, init_w, max_iters=args.max_iters, gamma=args.gamma
+        )
         return w, float(loss)
-    
+
     elif model == "reg_logistic":
         n_features = X.shape[1]
         init_w = np.zeros(n_features)
         y01 = to01(y_sign)
-        w, loss = reg_logistic_regression(y01, X, lambda_=args.lambda_, initial_w=init_w, max_iters=args.max_iters, gamma=args.gamma)
+        w, loss = reg_logistic_regression(
+            y01,
+            X,
+            lambda_=args.lambda_,
+            initial_w=init_w,
+            max_iters=args.max_iters,
+            gamma=args.gamma,
+        )
         return w, float(loss)
-    
+
     elif model == "logistic_weighted":
         n_features = X.shape[1]
         init_w = np.zeros(n_features)
         y01 = to01(y_sign)
-        class_weight = {0: getattr(args, 'class_weight_0', 1.0), 1: getattr(args, 'class_weight_1', 1.0)}
-        w, loss = logistic_regression_weighted(y01, X, init_w, max_iters=args.max_iters, gamma=args.gamma, class_weight=class_weight, random_state=random_state)
+        class_weight = {
+            0: getattr(args, "class_weight_0", 1.0),
+            1: getattr(args, "class_weight_1", 1.0),
+        }
+        w, loss = logistic_regression_weighted(
+            y01,
+            X,
+            init_w,
+            max_iters=args.max_iters,
+            gamma=args.gamma,
+            class_weight=class_weight,
+            random_state=random_state,
+        )
         return w, float(loss)
-    
+
     elif model == "reg_logistic_weighted":
         n_features = X.shape[1]
         init_w = np.zeros(n_features)
         y01 = to01(y_sign)
-        class_weight = {0: getattr(args, 'class_weight_0', 1.0), 1: getattr(args, 'class_weight_1', 1.0)}
-        w, loss = reg_logistic_regression_weighted(y01, X, lambda_=args.lambda_, initial_w=init_w, max_iters=args.max_iters, gamma=args.gamma, class_weight=class_weight, random_state=random_state)
+        class_weight = {
+            0: getattr(args, "class_weight_0", 1.0),
+            1: getattr(args, "class_weight_1", 1.0),
+        }
+        w, loss = reg_logistic_regression_weighted(
+            y01,
+            X,
+            lambda_=args.lambda_,
+            initial_w=init_w,
+            max_iters=args.max_iters,
+            gamma=args.gamma,
+            class_weight=class_weight,
+            random_state=random_state,
+        )
         return w, float(loss)
-    
+
     # Random Forest
     elif model == "random_forest":
         y01 = to01(y_sign)
         rf = RandomForestClassifier(
-            n_estimators=getattr(args, 'n_estimators', 100),
-            max_depth=getattr(args, 'max_depth', 10),
-            min_samples_split=getattr(args, 'min_samples_split', 20),
-            min_samples_leaf=getattr(args, 'min_samples_leaf', 10),
-            max_features=getattr(args, 'max_features', 'sqrt'),
+            n_estimators=getattr(args, "n_estimators", 100),
+            max_depth=getattr(args, "max_depth", 10),
+            min_samples_split=getattr(args, "min_samples_split", 20),
+            min_samples_leaf=getattr(args, "min_samples_leaf", 10),
+            max_features=getattr(args, "max_features", "sqrt"),
             random_state=random_state,
-            categorical_features=getattr(args, 'categorical_features', [])
+            categorical_features=getattr(args, "categorical_features", []),
         )
         rf.fit(X, y01)
         # Calculate training loss (misclassification rate)
         train_pred = rf.predict(X)
         loss = np.mean(train_pred != y01)
         return rf, float(loss)
-    
+
     else:
         raise ValueError(f"Unknown model: {model}")
 
@@ -321,13 +370,16 @@ def eval_fold_cv(i, folds, X, y_sign, model, args, k):
 
 def eval_combo_grid(params, model, X, y_sign, k, seed, metric):
     """Evaluate a single grid search combination - moved outside for ProcessPoolExecutor pickling."""
+
     # clone args with overrides to avoid race conditions
-    class A: pass
+    class A:
+        pass
+
     a = A()
     a.progress = False
     a.cv_n_jobs = 1
     a.metric = metric
-    
+
     # Set parameters based on model type
     if model in ["logistic", "reg_logistic"]:
         g, lmb, thr, iters = params
@@ -354,10 +406,9 @@ def eval_combo_grid(params, model, X, y_sign, k, seed, metric):
         a.categorical_features = []
         # Add threshold for Random Forest (not used in training but needed for evaluation)
         a.threshold = 0.5
-    
+
     result = cross_validate(model, X, y_sign, k=k, seed=seed, args=a)[0]
     return params, result
-
 
 
 def cross_validate(model, X, y_sign, k, seed, args):
@@ -375,7 +426,10 @@ def cross_validate(model, X, y_sign, k, seed, args):
     if cv_jobs > 1:
         print(f"CV parallel using ProcessPoolExecutor with {cv_jobs} workers")
         with ProcessPoolExecutor(max_workers=cv_jobs) as ex:
-            futures = [ex.submit(eval_fold_cv, i, folds, X, y_sign, model, args, k) for i in range(k)]
+            futures = [
+                ex.submit(eval_fold_cv, i, folds, X, y_sign, model, args, k)
+                for i in range(k)
+            ]
             it = futures
             if getattr(args, "progress", True):
                 it = tqdm(as_completed(futures), total=k, desc="CV folds", leave=False)
@@ -397,14 +451,18 @@ def cross_validate(model, X, y_sign, k, seed, args):
         if getattr(args, "progress", True):
             fold_iter = tqdm(fold_iter, desc="CV folds", leave=False)
         for i in fold_iter:
-            loss, metrics, roc_auc, pr_auc = eval_fold_cv(i, folds, X, y_sign, model, args, k)
+            loss, metrics, roc_auc, pr_auc = eval_fold_cv(
+                i, folds, X, y_sign, model, args, k
+            )
             fold_losses.append(loss)
             fold_metrics.append(metrics)
             fold_roc_aucs.append(roc_auc)
             fold_pr_aucs.append(pr_auc)
 
     # Aggregate
-    agg = {k: float(np.mean([m[k] for m in fold_metrics])) for k in fold_metrics[0].keys()}
+    agg = {
+        k: float(np.mean([m[k] for m in fold_metrics])) for k in fold_metrics[0].keys()
+    }
     agg["loss_mean"] = float(np.mean(fold_losses))
     agg["loss_std"] = float(np.std(fold_losses))
     agg["roc_auc"] = float(np.mean(fold_roc_aucs))
@@ -444,7 +502,7 @@ def plot_curves(scores, y_true_sign, out_dir, prefix="train"):
 
     plt.figure()
     plt.plot(fpr, tpr, label=f"ROC AUC={roc_auc:.3f}")
-    plt.plot([0,1],[0,1], linestyle="--", color="gray")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
     plt.xlabel("FPR")
     plt.ylabel("TPR")
     plt.title("ROC Curve")
@@ -468,57 +526,250 @@ def plot_curves(scores, y_true_sign, out_dir, prefix="train"):
 
 def main():
     """CLI entrypoint to train and evaluate logistic models on preprocessed data."""
-    parser = argparse.ArgumentParser(description="Train logistic models on preprocessed data")
-    parser.add_argument("--data_dir", type=str, default=None, help="Folder with x_train.csv,y_train.csv,x_test.csv. Overrides config.json if set.")
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config.json")
-    parser.add_argument("--model", type=str, default=None, choices=["logistic","reg_logistic","logistic_weighted","reg_logistic_weighted","random_forest"], help="Model to train. Overrides config.json if set.")
-    parser.add_argument("--k", type=int, default=None, help="K folds; overrides config.json")
+    parser = argparse.ArgumentParser(
+        description="Train logistic models on preprocessed data"
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=None,
+        help="Folder with x_train.csv,y_train.csv,x_test.csv. Overrides config.json if set.",
+    )
+    parser.add_argument(
+        "--config", type=str, default="config.json", help="Path to config.json"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        choices=[
+            "logistic",
+            "reg_logistic",
+            "logistic_weighted",
+            "reg_logistic_weighted",
+            "random_forest",
+        ],
+        help="Model to train. Overrides config.json if set.",
+    )
+    parser.add_argument(
+        "--k", type=int, default=None, help="K folds; overrides config.json"
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
-    parser.add_argument("--gamma", type=float, default=0.1, help="Learning rate for GD/SGD/logistic")
-    parser.add_argument("--lambda_", type=float, default=1e-3, help="Regularization strength for ridge/reg_logistic")
-    parser.add_argument("--max_iters", type=int, default=1000, help="Max iterations for iterative methods")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Classification threshold for logistic models")
+    parser.add_argument(
+        "--gamma", type=float, default=0.1, help="Learning rate for GD/SGD/logistic"
+    )
+    parser.add_argument(
+        "--lambda_",
+        type=float,
+        default=1e-3,
+        help="Regularization strength for ridge/reg_logistic",
+    )
+    parser.add_argument(
+        "--max_iters",
+        type=int,
+        default=1000,
+        help="Max iterations for iterative methods",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Classification threshold for logistic models",
+    )
     # Grid-search options
-    parser.add_argument("--metric", type=str, default="f1", choices=["f1","accuracy","roc_auc","pr_auc","precision","recall"], help="Selection metric for grid search")
-    parser.add_argument("--gamma_grid", type=str, default=None, help="Comma-separated gamma values for search")
-    parser.add_argument("--lambda_grid", type=str, default=None, help="Comma-separated lambda values for search")
-    parser.add_argument("--threshold_grid", type=str, default=None, help="Comma-separated threshold values for search")
-    parser.add_argument("--max_iters_grid", type=str, default=None, help="Comma-separated max_iters values for search")
-    parser.add_argument("--search_max_iters_grid", type=str, default=None, help="Comma-separated max_iters for SEARCH (overrides max_iters_grid during CV)")
-    parser.add_argument("--final_max_iters", type=int, default=None, help="Max iterations for FINAL training only (overrides best from search)")
-    parser.add_argument("--results_dir", type=str, default=None, help="Output directory base; overrides config.json")
-    parser.add_argument("--tag", type=str, default=None, help="Run tag for naming the results folder")
-    parser.add_argument("--make_submission", action="store_true", help="Write submission CSV using x_test.csv")
-    parser.add_argument("--no_progress", action="store_true", help="Disable tqdm progress bars")
-    parser.add_argument("--verbose", action="store_true", help="Verbose prints during search/training")
-    parser.add_argument("--raw_dataset_dir", type=str, default="dataset", help="Path to raw dataset to fetch test_ids for submission")
-    parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers for grid search (1 = no parallelism)")
-    parser.add_argument("--cv_n_jobs", type=int, default=1, help="Parallel workers for cross-validation folds (batch-CV)")
-    parser.add_argument("--early_stopping_tol", type=float, default=1e-6, help="Tolerance for early stopping (loss change threshold)")
-    parser.add_argument("--early_stopping_patience", type=int, default=10, help="Patience for early stopping (iterations to wait)")
-    parser.add_argument("--no_early_stopping", action="store_true", help="Disable early stopping (use original implementations)")
-        # Random Forest parameters
-    parser.add_argument("--max_depth", type=int, default=10, help="Maximum depth for Random Forest")
-    parser.add_argument("--min_samples_split", type=int, default=20, help="Minimum samples to split for Random Forest")
-    parser.add_argument("--min_samples_leaf", type=int, default=10, help="Minimum samples per leaf for Random Forest")
-    parser.add_argument("--n_estimators", type=int, default=100, help="Number of estimators for Random Forest")
-    parser.add_argument("--max_features", type=str, default="sqrt", choices=["sqrt", "log2", "all"], help="Number of features to consider for splits in Random Forest")
-    
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="f1",
+        choices=["f1", "accuracy", "roc_auc", "pr_auc", "precision", "recall"],
+        help="Selection metric for grid search",
+    )
+    parser.add_argument(
+        "--gamma_grid",
+        type=str,
+        default=None,
+        help="Comma-separated gamma values for search",
+    )
+    parser.add_argument(
+        "--lambda_grid",
+        type=str,
+        default=None,
+        help="Comma-separated lambda values for search",
+    )
+    parser.add_argument(
+        "--threshold_grid",
+        type=str,
+        default=None,
+        help="Comma-separated threshold values for search",
+    )
+    parser.add_argument(
+        "--max_iters_grid",
+        type=str,
+        default=None,
+        help="Comma-separated max_iters values for search",
+    )
+    parser.add_argument(
+        "--search_max_iters_grid",
+        type=str,
+        default=None,
+        help="Comma-separated max_iters for SEARCH (overrides max_iters_grid during CV)",
+    )
+    parser.add_argument(
+        "--final_max_iters",
+        type=int,
+        default=None,
+        help="Max iterations for FINAL training only (overrides best from search)",
+    )
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default=None,
+        help="Output directory base; overrides config.json",
+    )
+    parser.add_argument(
+        "--tag", type=str, default=None, help="Run tag for naming the results folder"
+    )
+    parser.add_argument(
+        "--make_submission",
+        action="store_true",
+        help="Write submission CSV using x_test.csv",
+    )
+    parser.add_argument(
+        "--no_progress", action="store_true", help="Disable tqdm progress bars"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Verbose prints during search/training"
+    )
+    parser.add_argument(
+        "--raw_dataset_dir",
+        type=str,
+        default="dataset",
+        help="Path to raw dataset to fetch test_ids for submission",
+    )
+    parser.add_argument(
+        "--n_jobs",
+        type=int,
+        default=1,
+        help="Parallel workers for grid search (1 = no parallelism)",
+    )
+    parser.add_argument(
+        "--cv_n_jobs",
+        type=int,
+        default=1,
+        help="Parallel workers for cross-validation folds (batch-CV)",
+    )
+    parser.add_argument(
+        "--early_stopping_tol",
+        type=float,
+        default=1e-6,
+        help="Tolerance for early stopping (loss change threshold)",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=10,
+        help="Patience for early stopping (iterations to wait)",
+    )
+    parser.add_argument(
+        "--no_early_stopping",
+        action="store_true",
+        help="Disable early stopping (use original implementations)",
+    )
+    # Random Forest parameters
+    parser.add_argument(
+        "--max_depth", type=int, default=10, help="Maximum depth for Random Forest"
+    )
+    parser.add_argument(
+        "--min_samples_split",
+        type=int,
+        default=20,
+        help="Minimum samples to split for Random Forest",
+    )
+    parser.add_argument(
+        "--min_samples_leaf",
+        type=int,
+        default=10,
+        help="Minimum samples per leaf for Random Forest",
+    )
+    parser.add_argument(
+        "--n_estimators",
+        type=int,
+        default=100,
+        help="Number of estimators for Random Forest",
+    )
+    parser.add_argument(
+        "--max_features",
+        type=str,
+        default="sqrt",
+        choices=["sqrt", "log2", "all"],
+        help="Number of features to consider for splits in Random Forest",
+    )
+
     # Random Forest grid search parameters
-    parser.add_argument("--n_estimators_grid", type=str, default=None, help="Comma-separated n_estimators values for Random Forest grid search")
-    parser.add_argument("--max_depth_grid", type=str, default=None, help="Comma-separated max_depth values for Random Forest grid search")
-    parser.add_argument("--min_samples_split_grid", type=str, default=None, help="Comma-separated min_samples_split values for Random Forest grid search")
-    parser.add_argument("--min_samples_leaf_grid", type=str, default=None, help="Comma-separated min_samples_leaf values for Random Forest grid search")
-    parser.add_argument("--max_features_grid", type=str, default=None, help="Comma-separated max_features values for Random Forest grid search")
-    
+    parser.add_argument(
+        "--n_estimators_grid",
+        type=str,
+        default=None,
+        help="Comma-separated n_estimators values for Random Forest grid search",
+    )
+    parser.add_argument(
+        "--max_depth_grid",
+        type=str,
+        default=None,
+        help="Comma-separated max_depth values for Random Forest grid search",
+    )
+    parser.add_argument(
+        "--min_samples_split_grid",
+        type=str,
+        default=None,
+        help="Comma-separated min_samples_split values for Random Forest grid search",
+    )
+    parser.add_argument(
+        "--min_samples_leaf_grid",
+        type=str,
+        default=None,
+        help="Comma-separated min_samples_leaf values for Random Forest grid search",
+    )
+    parser.add_argument(
+        "--max_features_grid",
+        type=str,
+        default=None,
+        help="Comma-separated max_features values for Random Forest grid search",
+    )
+
     # Categorical features (for Random Forest)
-    parser.add_argument("--categorical_features", type=str, default=None, help="Comma-separated list of categorical feature indices")
-    
+    parser.add_argument(
+        "--categorical_features",
+        type=str,
+        default=None,
+        help="Comma-separated list of categorical feature indices",
+    )
+
     # Class weights (for weighted logistic regression)
-    parser.add_argument("--class_weight_0", type=float, default=1.0, help="Weight for class 0 (negative class) in weighted logistic regression")
-    parser.add_argument("--class_weight_1", type=float, default=1.0, help="Weight for class 1 (positive class) in weighted logistic regression")
-    parser.add_argument("--class_weight_0_grid", type=str, default=None, help="Comma-separated class_weight_0 values for grid search")
-    parser.add_argument("--class_weight_1_grid", type=str, default=None, help="Comma-separated class_weight_1 values for grid search")
+    parser.add_argument(
+        "--class_weight_0",
+        type=float,
+        default=1.0,
+        help="Weight for class 0 (negative class) in weighted logistic regression",
+    )
+    parser.add_argument(
+        "--class_weight_1",
+        type=float,
+        default=1.0,
+        help="Weight for class 1 (positive class) in weighted logistic regression",
+    )
+    parser.add_argument(
+        "--class_weight_0_grid",
+        type=str,
+        default=None,
+        help="Comma-separated class_weight_0 values for grid search",
+    )
+    parser.add_argument(
+        "--class_weight_1_grid",
+        type=str,
+        default=None,
+        help="Comma-separated class_weight_1 values for grid search",
+    )
 
     args = parser.parse_args()
 
@@ -545,12 +796,16 @@ def main():
     args.progress = not args.no_progress
 
     # Store original cv_n_jobs for later restoration after grid search
-    args.original_cv_n_jobs = getattr(args, 'cv_n_jobs', 1)
+    args.original_cv_n_jobs = getattr(args, "cv_n_jobs", 1)
 
     # Parse categorical features if specified
     if args.categorical_features is not None:
         try:
-            args.categorical_features = [int(x.strip()) for x in args.categorical_features.split(",") if x.strip()]
+            args.categorical_features = [
+                int(x.strip())
+                for x in args.categorical_features.split(",")
+                if x.strip()
+            ]
         except ValueError:
             print("Warning: Invalid categorical_features format. Using empty list.")
             args.categorical_features = []
@@ -568,8 +823,6 @@ def main():
             args.cv_n_jobs = int(cfg["cv_n_jobs"])
         except Exception:
             pass
-    
-
 
     print("Started Loading")
     # Load data: always use preprocessed matrices; fetch test_ids from raw dataset
@@ -593,29 +846,73 @@ def main():
     # Allow metric and grids from config when CLI flags not provided
     if "metric" in cfg and (not hasattr(args, "metric") or args.metric == "f1"):
         args.metric = cfg["metric"]
-    gamma_grid = parse_grid(args.gamma_grid if args.gamma_grid is not None else cfg.get("gamma_grid"), float)
-    lambda_grid = parse_grid(args.lambda_grid if args.lambda_grid is not None else cfg.get("lambda_grid"), float)
-    threshold_grid = parse_grid(args.threshold_grid if args.threshold_grid is not None else cfg.get("threshold_grid"), float)
-    max_iters_grid = parse_grid(args.max_iters_grid if args.max_iters_grid is not None else cfg.get("max_iters_grid"), int)
-    search_max_iters_grid = parse_grid(args.search_max_iters_grid if args.search_max_iters_grid is not None else cfg.get("search_max_iters_grid"), int)
-    final_max_iters = args.final_max_iters if args.final_max_iters is not None else cfg.get("final_max_iters")
-    
+    gamma_grid = parse_grid(
+        args.gamma_grid if args.gamma_grid is not None else cfg.get("gamma_grid"), float
+    )
+    lambda_grid = parse_grid(
+        args.lambda_grid if args.lambda_grid is not None else cfg.get("lambda_grid"),
+        float,
+    )
+    threshold_grid = parse_grid(
+        (
+            args.threshold_grid
+            if args.threshold_grid is not None
+            else cfg.get("threshold_grid")
+        ),
+        float,
+    )
+    max_iters_grid = parse_grid(
+        (
+            args.max_iters_grid
+            if args.max_iters_grid is not None
+            else cfg.get("max_iters_grid")
+        ),
+        int,
+    )
+    search_max_iters_grid = parse_grid(
+        (
+            args.search_max_iters_grid
+            if args.search_max_iters_grid is not None
+            else cfg.get("search_max_iters_grid")
+        ),
+        int,
+    )
+    final_max_iters = (
+        args.final_max_iters
+        if args.final_max_iters is not None
+        else cfg.get("final_max_iters")
+    )
+
     # Class weight grids
-    class_weight_0_grid = parse_grid(args.class_weight_0_grid if args.class_weight_0_grid is not None else cfg.get("class_weight_0_grid"), float)
-    class_weight_1_grid = parse_grid(args.class_weight_1_grid if args.class_weight_1_grid is not None else cfg.get("class_weight_1_grid"), float)
+    class_weight_0_grid = parse_grid(
+        (
+            args.class_weight_0_grid
+            if args.class_weight_0_grid is not None
+            else cfg.get("class_weight_0_grid")
+        ),
+        float,
+    )
+    class_weight_1_grid = parse_grid(
+        (
+            args.class_weight_1_grid
+            if args.class_weight_1_grid is not None
+            else cfg.get("class_weight_1_grid")
+        ),
+        float,
+    )
 
     # Random Forest parameters from config
-    if "n_estimators" in cfg and not hasattr(args, 'n_estimators'):
+    if "n_estimators" in cfg and not hasattr(args, "n_estimators"):
         args.n_estimators = cfg["n_estimators"]
-    if "max_depth" in cfg and not hasattr(args, 'max_depth'):
+    if "max_depth" in cfg and not hasattr(args, "max_depth"):
         args.max_depth = cfg["max_depth"]
-    if "min_samples_split" in cfg and not hasattr(args, 'min_samples_split'):
+    if "min_samples_split" in cfg and not hasattr(args, "min_samples_split"):
         args.min_samples_split = cfg["min_samples_split"]
-    if "min_samples_leaf" in cfg and not hasattr(args, 'min_samples_leaf'):
+    if "min_samples_leaf" in cfg and not hasattr(args, "min_samples_leaf"):
         args.min_samples_leaf = cfg["min_samples_leaf"]
-    if "max_features" in cfg and not hasattr(args, 'max_features'):
+    if "max_features" in cfg and not hasattr(args, "max_features"):
         args.max_features = cfg["max_features"]
-    if "categorical_features" in cfg and not hasattr(args, 'categorical_features'):
+    if "categorical_features" in cfg and not hasattr(args, "categorical_features"):
         args.categorical_features = cfg["categorical_features"]
     else:
         args.categorical_features = []
@@ -623,41 +920,96 @@ def main():
     best = None
     searched = False
     # prefer dedicated search grid for iterations if provided
-    iters_list = search_max_iters_grid or max_iters_grid 
+    iters_list = search_max_iters_grid or max_iters_grid
 
     # Check if we should do grid search based on model type
     if model == "random_forest":
         # Check for Random Forest grid parameters
-        n_estimators_grid = parse_grid(args.n_estimators_grid if hasattr(args, 'n_estimators_grid') and args.n_estimators_grid else cfg.get("n_estimators_grid"), int)
-        max_depth_grid = parse_grid(args.max_depth_grid if hasattr(args, 'max_depth_grid') and args.max_depth_grid else cfg.get("max_depth_grid"), int)
-        min_samples_split_grid = parse_grid(args.min_samples_split_grid if hasattr(args, 'min_samples_split_grid') and args.min_samples_split_grid else cfg.get("min_samples_split_grid"), int)
-        min_samples_leaf_grid = parse_grid(args.min_samples_leaf_grid if hasattr(args, 'min_samples_leaf_grid') and args.min_samples_leaf_grid else cfg.get("min_samples_leaf_grid"), int)
-        max_features_grid = parse_grid(args.max_features_grid if hasattr(args, 'max_features_grid') and args.max_features_grid else cfg.get("max_features_grid"), str)
-        
-        if any(v is not None for v in [n_estimators_grid, max_depth_grid, min_samples_split_grid, min_samples_leaf_grid, max_features_grid]):
+        n_estimators_grid = parse_grid(
+            (
+                args.n_estimators_grid
+                if hasattr(args, "n_estimators_grid") and args.n_estimators_grid
+                else cfg.get("n_estimators_grid")
+            ),
+            int,
+        )
+        max_depth_grid = parse_grid(
+            (
+                args.max_depth_grid
+                if hasattr(args, "max_depth_grid") and args.max_depth_grid
+                else cfg.get("max_depth_grid")
+            ),
+            int,
+        )
+        min_samples_split_grid = parse_grid(
+            (
+                args.min_samples_split_grid
+                if hasattr(args, "min_samples_split_grid")
+                and args.min_samples_split_grid
+                else cfg.get("min_samples_split_grid")
+            ),
+            int,
+        )
+        min_samples_leaf_grid = parse_grid(
+            (
+                args.min_samples_leaf_grid
+                if hasattr(args, "min_samples_leaf_grid") and args.min_samples_leaf_grid
+                else cfg.get("min_samples_leaf_grid")
+            ),
+            int,
+        )
+        max_features_grid = parse_grid(
+            (
+                args.max_features_grid
+                if hasattr(args, "max_features_grid") and args.max_features_grid
+                else cfg.get("max_features_grid")
+            ),
+            str,
+        )
+
+        if any(
+            v is not None
+            for v in [
+                n_estimators_grid,
+                max_depth_grid,
+                min_samples_split_grid,
+                min_samples_leaf_grid,
+                max_features_grid,
+            ]
+        ):
             searched = True
             print("Starting Random Forest grid search...")
     else:
         # Check for logistic regression grid parameters (including weighted models)
-        if any(v is not None for v in [gamma_grid, lambda_grid, threshold_grid, iters_list, class_weight_0_grid, class_weight_1_grid]):
+        if any(
+            v is not None
+            for v in [
+                gamma_grid,
+                lambda_grid,
+                threshold_grid,
+                iters_list,
+                class_weight_0_grid,
+                class_weight_1_grid,
+            ]
+        ):
             searched = True
             if model in ["logistic_weighted", "reg_logistic_weighted"]:
                 print("Starting weighted logistic regression grid search...")
             else:
                 print("Starting logistic regression grid search...")
-    
+
     if searched:
         gammas = gamma_grid or [args.gamma]
         lambdas = lambda_grid or [args.lambda_]
         thresholds = threshold_grid or [args.threshold]
         # iters_list already set above
-        
+
         # Class weights for weighted models
-        class_weights_0 = class_weight_0_grid or [getattr(args, 'class_weight_0', 1.0)]
-        class_weights_1 = class_weight_1_grid or [getattr(args, 'class_weight_1', 1.0)]
+        class_weights_0 = class_weight_0_grid or [getattr(args, "class_weight_0", 1.0)]
+        class_weights_1 = class_weight_1_grid or [getattr(args, "class_weight_1", 1.0)]
 
         print("Starting grid search...")
-        
+
         # Generate parameter combinations based on model type
         if model == "random_forest":
             # Parse Random Forest parameters
@@ -666,60 +1018,128 @@ def main():
             min_samples_split_list = min_samples_split_grid
             min_samples_leaf_list = min_samples_leaf_grid
             max_features_list = max_features_grid
-            
+
             if n_estimators_list is None:
-                n_estimators_list = [getattr(args, 'n_estimators', 100)]
+                n_estimators_list = [getattr(args, "n_estimators", 100)]
             if max_depth_list is None:
-                max_depth_list = [getattr(args, 'max_depth', 10)]
+                max_depth_list = [getattr(args, "max_depth", 10)]
             if min_samples_split_list is None:
-                min_samples_split_list = [getattr(args, 'min_samples_split', 20)]
+                min_samples_split_list = [getattr(args, "min_samples_split", 20)]
             if min_samples_leaf_list is None:
-                min_samples_leaf_list = [getattr(args, 'min_samples_leaf', 10)]
+                min_samples_leaf_list = [getattr(args, "min_samples_leaf", 10)]
             if max_features_list is None:
-                max_features_list = [getattr(args, 'max_features', 'sqrt')]
-            
-            total = len(n_estimators_list) * len(max_depth_list) * len(min_samples_split_list) * len(min_samples_leaf_list) * len(max_features_list)
-            combos = [(n_est, max_d, min_split, min_leaf, max_feat) 
-                     for n_est in n_estimators_list 
-                     for max_d in max_depth_list 
-                     for min_split in min_samples_split_list 
-                     for min_leaf in min_samples_leaf_list 
-                     for max_feat in max_features_list]
+                max_features_list = [getattr(args, "max_features", "sqrt")]
+
+            total = (
+                len(n_estimators_list)
+                * len(max_depth_list)
+                * len(min_samples_split_list)
+                * len(min_samples_leaf_list)
+                * len(max_features_list)
+            )
+            combos = [
+                (n_est, max_d, min_split, min_leaf, max_feat)
+                for n_est in n_estimators_list
+                for max_d in max_depth_list
+                for min_split in min_samples_split_list
+                for min_leaf in min_samples_leaf_list
+                for max_feat in max_features_list
+            ]
         else:
             # Logistic regression parameters (including weighted models)
             if model in ["logistic_weighted", "reg_logistic_weighted"]:
-                total = len(gammas) * len(lambdas) * len(thresholds) * len(iters_list) * len(class_weights_0) * len(class_weights_1)
-                combos = [(g, lmb, thr, iters, cw0, cw1) for g in gammas for lmb in lambdas for thr in thresholds for iters in iters_list for cw0 in class_weights_0 for cw1 in class_weights_1]
+                total = (
+                    len(gammas)
+                    * len(lambdas)
+                    * len(thresholds)
+                    * len(iters_list)
+                    * len(class_weights_0)
+                    * len(class_weights_1)
+                )
+                combos = [
+                    (g, lmb, thr, iters, cw0, cw1)
+                    for g in gammas
+                    for lmb in lambdas
+                    for thr in thresholds
+                    for iters in iters_list
+                    for cw0 in class_weights_0
+                    for cw1 in class_weights_1
+                ]
             else:
                 total = len(gammas) * len(lambdas) * len(thresholds) * len(iters_list)
-                combos = [(g, lmb, thr, iters) for g in gammas for lmb in lambdas for thr in thresholds for iters in iters_list]
+                combos = [
+                    (g, lmb, thr, iters)
+                    for g in gammas
+                    for lmb in lambdas
+                    for thr in thresholds
+                    for iters in iters_list
+                ]
 
         if args.n_jobs and args.n_jobs > 1:
-            print(f"Grid search parallel using ProcessPoolExecutor with {args.n_jobs} workers")
+            print(
+                f"Grid search parallel using ProcessPoolExecutor with {args.n_jobs} workers"
+            )
             with ProcessPoolExecutor(max_workers=args.n_jobs) as ex:
-                futures = [ex.submit(eval_combo_grid, p, model, X, y_sign, k, seed, args.metric) for p in combos]
+                futures = [
+                    ex.submit(
+                        eval_combo_grid, p, model, X, y_sign, k, seed, args.metric
+                    )
+                    for p in combos
+                ]
                 it = futures
                 if args.progress:
-                    it = tqdm(as_completed(futures), total=total, desc="Grid search", leave=False)
+                    it = tqdm(
+                        as_completed(futures),
+                        total=total,
+                        desc="Grid search",
+                        leave=False,
+                    )
                 for fut in it:
                     if args.progress:
                         params, agg_res = fut.result()
                     else:
                         params, agg_res = fut.result()
-                    
+
                     score = agg_res[args.metric]
-                    
+
                     # Create candidate based on model type
                     if model == "random_forest":
                         n_est, max_d, min_split, min_leaf, max_feat = params
-                        cand = {"n_estimators": n_est, "max_depth": max_d, "min_samples_split": min_split, "min_samples_leaf": min_leaf, "max_features": max_feat, "metric": args.metric, "score": float(score), "cv": agg_res}
+                        cand = {
+                            "n_estimators": n_est,
+                            "max_depth": max_d,
+                            "min_samples_split": min_split,
+                            "min_samples_leaf": min_leaf,
+                            "max_features": max_feat,
+                            "metric": args.metric,
+                            "score": float(score),
+                            "cv": agg_res,
+                        }
                     elif model in ["logistic_weighted", "reg_logistic_weighted"]:
                         g, lmb, thr, iters, cw0, cw1 = params
-                        cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "class_weight_0": cw0, "class_weight_1": cw1, "metric": args.metric, "score": float(score), "cv": agg_res}
+                        cand = {
+                            "gamma": g,
+                            "lambda_": lmb,
+                            "threshold": thr,
+                            "max_iters": iters,
+                            "class_weight_0": cw0,
+                            "class_weight_1": cw1,
+                            "metric": args.metric,
+                            "score": float(score),
+                            "cv": agg_res,
+                        }
                     else:
                         g, lmb, thr, iters = params
-                        cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "metric": args.metric, "score": float(score), "cv": agg_res}
-                    
+                        cand = {
+                            "gamma": g,
+                            "lambda_": lmb,
+                            "threshold": thr,
+                            "max_iters": iters,
+                            "metric": args.metric,
+                            "score": float(score),
+                            "cv": agg_res,
+                        }
+
                     if (best is None) or (score > best["score"]):
                         best = cand
                         if args.verbose:
@@ -732,28 +1152,84 @@ def main():
                 # Create args object based on model type
                 if model == "random_forest":
                     n_est, max_d, min_split, min_leaf, max_feat = params
-                    a = argparse.Namespace(n_estimators=n_est, max_depth=max_d, min_samples_split=min_split, min_samples_leaf=min_leaf, max_features=max_feat, categorical_features=[], threshold=0.5, progress=False, metric=args.metric, cv_n_jobs=args.cv_n_jobs)
+                    a = argparse.Namespace(
+                        n_estimators=n_est,
+                        max_depth=max_d,
+                        min_samples_split=min_split,
+                        min_samples_leaf=min_leaf,
+                        max_features=max_feat,
+                        categorical_features=[],
+                        threshold=0.5,
+                        progress=False,
+                        metric=args.metric,
+                        cv_n_jobs=args.cv_n_jobs,
+                    )
                 elif model in ["logistic_weighted", "reg_logistic_weighted"]:
                     g, lmb, thr, iters, cw0, cw1 = params
-                    a = argparse.Namespace(gamma=g, lambda_=lmb, threshold=thr, max_iters=iters, class_weight_0=cw0, class_weight_1=cw1, progress=False, metric=args.metric, cv_n_jobs=args.cv_n_jobs)
+                    a = argparse.Namespace(
+                        gamma=g,
+                        lambda_=lmb,
+                        threshold=thr,
+                        max_iters=iters,
+                        class_weight_0=cw0,
+                        class_weight_1=cw1,
+                        progress=False,
+                        metric=args.metric,
+                        cv_n_jobs=args.cv_n_jobs,
+                    )
                 else:
                     g, lmb, thr, iters = params
-                    a = argparse.Namespace(gamma=g, lambda_=lmb, threshold=thr, max_iters=iters, progress=False, metric=args.metric, cv_n_jobs=args.cv_n_jobs)
-                
+                    a = argparse.Namespace(
+                        gamma=g,
+                        lambda_=lmb,
+                        threshold=thr,
+                        max_iters=iters,
+                        progress=False,
+                        metric=args.metric,
+                        cv_n_jobs=args.cv_n_jobs,
+                    )
+
                 agg_res, _, _ = cross_validate(model, X, y_sign, k=k, seed=seed, args=a)
                 score = agg_res[args.metric]
-                
+
                 # Create candidate based on model type
                 if model == "random_forest":
                     n_est, max_d, min_split, min_leaf, max_feat = params
-                    cand = {"n_estimators": n_est, "max_depth": max_d, "min_samples_split": min_split, "min_samples_leaf": min_leaf, "max_features": max_feat, "metric": args.metric, "score": float(score), "cv": agg_res}
+                    cand = {
+                        "n_estimators": n_est,
+                        "max_depth": max_d,
+                        "min_samples_split": min_split,
+                        "min_samples_leaf": min_leaf,
+                        "max_features": max_feat,
+                        "metric": args.metric,
+                        "score": float(score),
+                        "cv": agg_res,
+                    }
                 elif model in ["logistic_weighted", "reg_logistic_weighted"]:
                     g, lmb, thr, iters, cw0, cw1 = params
-                    cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "class_weight_0": cw0, "class_weight_1": cw1, "metric": args.metric, "score": float(score), "cv": agg_res}
+                    cand = {
+                        "gamma": g,
+                        "lambda_": lmb,
+                        "threshold": thr,
+                        "max_iters": iters,
+                        "class_weight_0": cw0,
+                        "class_weight_1": cw1,
+                        "metric": args.metric,
+                        "score": float(score),
+                        "cv": agg_res,
+                    }
                 else:
                     g, lmb, thr, iters = params
-                    cand = {"gamma": g, "lambda_": lmb, "threshold": thr, "max_iters": iters, "metric": args.metric, "score": float(score), "cv": agg_res}
-                
+                    cand = {
+                        "gamma": g,
+                        "lambda_": lmb,
+                        "threshold": thr,
+                        "max_iters": iters,
+                        "metric": args.metric,
+                        "score": float(score),
+                        "cv": agg_res,
+                    }
+
                 if (best is None) or (score > best["score"]):
                     best = cand
                     if args.verbose:
@@ -772,19 +1248,26 @@ def main():
             args.class_weight_0 = best["class_weight_0"]
             args.class_weight_1 = best["class_weight_1"]
             # set final training iterations: prefer explicit final_max_iters, else best from search
-            args.max_iters = int(final_max_iters) if final_max_iters is not None else best["max_iters"]
+            args.max_iters = (
+                int(final_max_iters)
+                if final_max_iters is not None
+                else best["max_iters"]
+            )
         else:
             args.gamma = best["gamma"]
             args.lambda_ = best["lambda_"]
             args.threshold = best["threshold"]
             # set final training iterations: prefer explicit final_max_iters, else best from search
-            args.max_iters = int(final_max_iters) if final_max_iters is not None else best["max_iters"]
+            args.max_iters = (
+                int(final_max_iters)
+                if final_max_iters is not None
+                else best["max_iters"]
+            )
         print(f"Best by {args.metric}: {best}")
-
 
     # CV with final params (either searched best or provided)
     # Restore original cv_n_jobs for parallel CV after grid search
-    original_cv_n_jobs = getattr(args, 'original_cv_n_jobs', 1)
+    original_cv_n_jobs = getattr(args, "original_cv_n_jobs", 1)
     args.cv_n_jobs = original_cv_n_jobs
     agg, per_fold, losses = cross_validate(model, X, y_sign, k=k, seed=seed, args=args)
     print({k: round(v, 4) if isinstance(v, float) else v for k, v in agg.items()})
@@ -792,41 +1275,40 @@ def main():
     # Train on full train set with final params
     w, train_loss = train_once(model, X, y_sign, args)
 
-
     # COMMENTED OUT: Post-training threshold selection to prevent overfitting
     # This section was causing overfitting because:
     # 1. Target encoding already uses target information during preprocessing
     # 2. Threshold selection uses target information again
     # 3. This creates double information leakage and inflated validation scores
-    # 
+    #
     # if args.metric in ["pr_auc", "roc_auc"]:
     #     print("Selecting optimal threshold on validation split...")
     #     from sklearn.model_selection import train_test_split
     #     X_train_final, X_val, y_train_final, y_val = train_test_split(
     #         X, y_sign, test_size=0.2, random_state=seed, stratify=y_sign
     #     )
-    #     
+    #
     #     # Retrain on train_final
     #     w_final, _ = train_once(model, X_train_final, y_train_final, args)
-    #     
+    #
     #     # Find best threshold on validation
     #     val_scores = predict_scores(X_val, w_final)
     #     best_threshold = 0.5
     #     best_f1 = 0
-    #     
+    #
     #     for thresh in np.arange(0.1, 0.9, 0.05):
     #         yhat = to_sign(val_scores, threshold=thresh)
     #         metrics = compute_metrics(y_val, yhat)
     #         if metrics["f1"] > best_f1:
     #             best_f1 = metrics["f1"]
     #             best_threshold = thresh
-    #     
+    #
     #     args.threshold = best_threshold
     #     print(f"Selected threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
-    #     
+    #
     #     # Retrain on full dataset with selected threshold
     #     w, train_loss = train_once(model, X, y_sign, args)
-    
+
     # Train-set curves (using train predictions)
     scores_train = predict_scores(X, w)
     aucs = plot_curves(scores_train, y_sign, out_dir, prefix=f"{model}_train")
@@ -847,8 +1329,8 @@ def main():
             "lambda_": args.lambda_,
             "max_iters": args.max_iters,
             "threshold": args.threshold,
-            "class_weight_0": getattr(args, 'class_weight_0', 1.0),
-            "class_weight_1": getattr(args, 'class_weight_1', 1.0),
+            "class_weight_0": getattr(args, "class_weight_0", 1.0),
+            "class_weight_1": getattr(args, "class_weight_1", 1.0),
         }
     else:
         params_dict = {
@@ -857,7 +1339,7 @@ def main():
             "max_iters": args.max_iters,
             "threshold": args.threshold,
         }
-    
+
     summary = {
         "data_dir": data_dir,
         "model": model,
@@ -893,5 +1375,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

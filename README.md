@@ -130,13 +130,6 @@ Tips for Apple Silicon (M1/M2):
 - Set `seed` in `config.json` or via CLI.
 - Folds are stratified by label.
 
-
-## Troubleshooting
-
-- If the process appears “stuck” during grid search: ensure `n_jobs` and `cv_n_jobs` are set, and confirm functions used in parallel are top-level (already handled in `run.py`).
-- If predictions seem to use threshold 0.5: verify `threshold` in `config.json`. `run.py` now merges config values early so they are respected throughout CV and submission.
-
-
 ## Repository Structure
 
 - `preprocessing.py`: defines levels, fits state, and writes preprocessed matrices

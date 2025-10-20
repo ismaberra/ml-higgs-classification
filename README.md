@@ -145,4 +145,6 @@ Tips for Apple Silicon (M1/M2):
 - `new_implementations.py`: optimized Random Forest and weighted logistic variants
 - `helpers.py`: IO utilities
 - `config.json`: main configuration for runs
+- `eda.py`: helper functions for the exploratory data analysis
+- `eda.ipynb`: Exploratory Data Analysis
 - `report.pdf`: final report of the project

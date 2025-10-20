@@ -745,7 +745,7 @@ def main():
     # Run all levels and export each to its own folder
     os.makedirs("preprocessed", exist_ok=True)
     run_all_levels(
-        x_train, x_test, y_train, cont_features_orig, only=["level2_unbalanced"]
+        x_train, x_test, y_train, cont_features_orig, only=["level2"]
     )
 
     print("\n[Done] All levels exported under ./preprocessed/")

@@ -1,40 +1,23 @@
 {
-  "data_dir": "/preprocessed/level1",
+  "data_dir": "/preprocessed/level2",
   "use_preprocessed": false,
 
-  "model": "logistic_weighted",
+  "model": "reg_logistic",
   "k": 5,
   "seed": 1,
 
   "metric": "pr_auc",
-  "search_max_iters_grid": "600",
-  "final_max_iters": 3000,
+  "gamma": 0.15,
+  "lambda_": 0.0003,
+  "max_iters": 3000,
+  "threshold": 0.5,
 
   "results_dir": "results",
-  "tag": "weighted_log_level1",
+  "tag": "regularized_logistic_level2",
   "make_submission": true,
   "raw_dataset_dir": "/dataset",
   "n_jobs": 3,
-  "cv_n_jobs": 2,
-  "no_early_stopping": true,
+  "cv_n_jobs": 2
 
-  "n_estimators": 100,
-  "max_depth": 10,
-  "min_samples_split": 20,
-  "min_samples_leaf": 10,
-  "max_features": "sqrt",
-  "categorical_features": [],
-  "n_estimators_grid": "10,20,30",
-  "max_depth_grid": "4,6,8",
-  "min_samples_split_grid": "100,200",
-  "min_samples_leaf_grid": "50,100",
-  "max_features_grid": "sqrt",
-
-  "class_weight_0": 0.5,
-  "class_weight_1": 6.0,
-  "class_weight_0_grid": "0.5,1.0,2.0",
-  "class_weight_1_grid": "4.0,6.0,8.0,10.0,12.0",
-  
-  "gamma_grid": "0.01,0.05,0.1"
 }
 

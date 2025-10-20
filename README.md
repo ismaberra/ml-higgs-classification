@@ -8,6 +8,23 @@ This repository contains a complete ML pipeline for a binary, highly imbalanced 
 - Parallelization using `ProcessPoolExecutor` for grid search and CV
 
 
+## How to Obtain Same submission.csv as Best Submission
+
+To reproduce the best submission results:
+
+1) Run preprocessing to create the level2 preprocessed data:
+```bash
+python preprocessing.py
+```
+This will create `preprocessed/level2/` with the preprocessed training and test data.
+
+2) Run the model training and generate submission:
+```bash
+python run.py --config config.json
+```
+This will create `results/regularized_logistic_level2/submission.csv` with the final predictions.
+
+
 ## Setup
 
 1) Python 3.10+ recommended.

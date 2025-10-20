@@ -220,71 +220,98 @@ def apply_standardizer(x: np.ndarray, cont_features: list, means: dict, stds: di
 # One-hot (fit/transform)
 # ============================================================
 
-def fit_one_hot(x: np.ndarray, cat_features: list, min_count: int = 50, max_categories: int = 50):
+def fit_target_encoding(x: np.ndarray, y: np.ndarray, cat_features: list, min_count: int = 50, max_categories: int = 50, smoothing: float = 1.0):
     """
-    Learn one-hot specs for categorical features:
-      - Keeps up to max_categories most frequent values
+    Learn target encoding for categorical features:
+      - For each category, compute mean target value
+      - Apply smoothing to handle rare categories
       - Groups rare categories (count < min_count) into 'OTHER' bucket
+      - Keeps up to max_categories most frequent values
 
     Returns:
-        specs : dict {feature_idx: {"values": np.array, "other": bool}}
+        specs : dict {feature_idx: {"encodings": dict, "other_encoding": float, "global_mean": float}}
     """
     specs = {}
+    global_mean = np.mean(y)
+    
     for j in cat_features:
         col = x[:, j]
         vals, counts = np.unique(col, return_counts=True)
         order = np.argsort(counts)[::-1]
         vals, counts = vals[order], counts[order]
 
+        # Keep frequent categories
         keep_mask = counts >= min_count
         kept_vals = vals[keep_mask]
         if kept_vals.size > max_categories:
             kept_vals = kept_vals[:max_categories]
 
+        # Compute target encodings for kept categories
+        encodings = {}
+        for val in kept_vals:
+            mask = (col == val)
+            if mask.sum() > 0:
+                # Target encoding with smoothing
+                category_mean = np.mean(y[mask])
+                n_samples = mask.sum()
+                # Smoothing: blend category mean with global mean
+                encoding = (category_mean * n_samples + global_mean * smoothing) / (n_samples + smoothing)
+                encodings[val] = encoding
+
+        # Compute encoding for "OTHER" category (rare values)
+        other_mask = ~np.isin(col, kept_vals)
+        if other_mask.sum() > 0:
+            other_mean = np.mean(y[other_mask])
+            other_n = other_mask.sum()
+            other_encoding = (other_mean * other_n + global_mean * smoothing) / (other_n + smoothing)
+        else:
+            other_encoding = global_mean
+
         specs[j] = {
-            "values": kept_vals.astype(float),
-            "other": kept_vals.size < vals.size
+            "encodings": encodings,
+            "other_encoding": other_encoding,
+            "global_mean": global_mean,
+            "kept_vals": kept_vals,
+            "has_other": kept_vals.size < vals.size
         }
     return specs
 
 
-def transform_one_hot(x: np.ndarray, cat_features: list, specs: dict):
+def transform_target_encoding(x: np.ndarray, cat_features: list, specs: dict):
     """
-    Apply one-hot encoding using fitted specs.
+    Apply target encoding using fitted specs.
     Returns:
-        X_oh : numpy array with concatenated one-hot features
+        X_te : numpy array with target-encoded features (one column per categorical feature)
     """
     n = x.shape[0]
-    encoded_blocks = []
+    encoded_features = []
 
     for j in cat_features:
         col = x[:, j]
-        values = specs[j]["values"]
-        other_flag = specs[j]["other"]
-        width = values.size + (1 if other_flag else 0)
-        oh = np.zeros((n, width))
+        spec = specs[j]
+        encodings = spec["encodings"]
+        other_encoding = spec["other_encoding"]
+        global_mean = spec["global_mean"]
+        kept_vals = spec["kept_vals"]
+        has_other = spec["has_other"]
+        
+        # Initialize with global mean (fallback for unseen categories)
+        encoded_col = np.full(n, global_mean)
+        
+        # Apply encodings for kept categories
+        for val, encoding in encodings.items():
+            mask = (col == val)
+            encoded_col[mask] = encoding
+        
+        # Apply encoding for "OTHER" category
+        if has_other:
+            other_mask = ~np.isin(col, kept_vals)
+            encoded_col[other_mask] = other_encoding
+        
+        encoded_features.append(encoded_col.reshape(-1, 1))
 
-        # Vectorized-ish fill
-        if values.size > 0:
-            # For each kept value, set the right column
-            for k, v in enumerate(values):
-                hits = (col == v)
-                oh[hits, k] = 1.0
-        if other_flag:
-            # Any row not matching any kept value => OTHER
-            if values.size > 0:
-                any_match = np.zeros(n, dtype=bool)
-                for v in values:
-                    any_match |= (col == v)
-                oh[~any_match, -1] = 1.0
-            else:
-                # No kept values -> everything goes to OTHER
-                oh[:, -1] = 1.0
-
-        encoded_blocks.append(oh)
-
-    if encoded_blocks:
-        return np.concatenate(encoded_blocks, axis=1)
+    if encoded_features:
+        return np.concatenate(encoded_features, axis=1)
     else:
         return np.empty((n, 0))
 
@@ -295,14 +322,16 @@ def transform_one_hot(x: np.ndarray, cat_features: list, specs: dict):
 
 def fit_preprocessor(
     X_train: np.ndarray,
+    y_train: np.ndarray,
     cont_features_orig: list,
     missing_threshold: float = 0.5,
     drop_low_var: bool = True,
     lowvar_threshold: float = 0.995,
     cont_strategy: str = "mean",
     cat_strategy: str = "mode",
-    onehot_min_count: int = 50,
-    onehot_max_categories: int = 50,
+    target_encoding_min_count: int = 50,
+    target_encoding_max_categories: int = 50,
+    target_encoding_smoothing: float = 1.0,
     drop_duplicates: bool = False,
 ):
     """
@@ -316,8 +345,9 @@ def fit_preprocessor(
         "lowvar_threshold": float(lowvar_threshold),
         "cont_strategy": cont_strategy,
         "cat_strategy": cat_strategy,
-        "onehot_min_count": int(onehot_min_count),
-        "onehot_max_categories": int(onehot_max_categories),
+        "target_encoding_min_count": int(target_encoding_min_count),
+        "target_encoding_max_categories": int(target_encoding_max_categories),
+        "target_encoding_smoothing": float(target_encoding_smoothing),
         # --- learned selections ---
         "kept_after_missing": None,
         "kept_after_lowvar_rel": None,
@@ -336,26 +366,26 @@ def fit_preprocessor(
         "final_dim_before_oh": None,
     }
 
-    # Drop features with too many missing values
+    # 1️⃣ Drop features with too many missing values
     X_miss, kept_after_missing, _ = drop_missing_features(X_train, threshold=missing_threshold)
 
-    # Drop low-variance features (optional)
+    # 2️⃣ Drop low-variance features (optional)
     if drop_low_var:
         X_lv, kept_lowvar_rel, _ = drop_low_variance_features(X_miss, threshold=lowvar_threshold)
     else:
         X_lv, kept_lowvar_rel = X_miss, list(range(X_miss.shape[1]))
 
-    # Drop duplicate features right after low variance
+    # 3️⃣ (NEW POSITION) Drop duplicate features right after low variance
     if drop_duplicates:
         X_dd, kept_dups_rel, dup_map = drop_duplicate_features(X_lv)
     else:
         X_dd, kept_dups_rel, dup_map = X_lv, list(range(X_lv.shape[1])), {}
 
-    #  Compose absolute kept indices relative to original columns 
+    # --- Compose absolute kept indices relative to original columns ---
     final_kept_abs = [kept_after_missing[i] for i in kept_lowvar_rel]
     final_kept_abs = [final_kept_abs[i] for i in kept_dups_rel]
 
-    # Remap continuous indices through all previous selections
+    # 4️⃣ Remap continuous indices through all previous selections
     cont_after_missing = _remap_indices_through_keep(cont_features_orig, kept_after_missing)
     cont_after_lowvar = _remap_indices_through_keep(cont_after_missing, kept_lowvar_rel)
     cont_after_dups   = _remap_indices_through_keep(cont_after_lowvar, kept_dups_rel)
@@ -363,27 +393,27 @@ def fit_preprocessor(
     n_cols_dd = X_dd.shape[1]
     cat_after_dups = _complement(n_cols_dd, cont_after_dups)
 
-    # Fit imputers on de-duplicated matrix
+    # 5️⃣ Fit imputers on de-duplicated matrix
     imp_cont, imp_cat = fit_imputer(X_dd, cont_after_dups,
                                     strategy_cont=cont_strategy,
                                     strategy_cat=cat_strategy)
 
-    # Apply imputation once to compute standardization safely
+    # 6️⃣ Apply imputation once to compute standardization safely
     X_imp = apply_imputer(X_dd, imp_cont, imp_cat)
 
-    # Fit standardizer on continuous features
+    # 7️⃣ Fit standardizer on continuous features
     std_means, std_stds = fit_standardizer(X_imp, cont_after_dups)
 
-    # Fit one-hot encoder specs on categorical features
-    oh_specs = fit_one_hot(
-        X_imp, cat_after_dups,
-        min_count=onehot_min_count,
-        max_categories=onehot_max_categories
+    # 8️⃣ Fit target encoding specs on categorical features
+    te_specs = fit_target_encoding(
+        X_imp, y_train, cat_after_dups,
+        min_count=target_encoding_min_count,
+        max_categories=target_encoding_max_categories,
+        smoothing=target_encoding_smoothing
     )
-    oh_specs = {int(k): {"values": v["values"], "other": v["other"]}
-                for k, v in oh_specs.items()}
+    te_specs = {int(k): v for k, v in te_specs.items()}
 
-    #  Store everything 
+    # --- Store everything ---
     state.update({
         "kept_after_missing": kept_after_missing,
         "kept_after_lowvar_rel": kept_lowvar_rel,
@@ -395,10 +425,11 @@ def fit_preprocessor(
         "imp_cat": imp_cat,
         "std_means": std_means,
         "std_stds": std_stds,
-        "onehot_specs": oh_specs,
+        "target_encoding_specs": te_specs,
         "final_dim_before_oh": int(n_cols_dd),
     })
     return state
+
 
 
 def _to_int_list(seq):
@@ -410,18 +441,18 @@ def transform_with_state(X: np.ndarray, state: dict):
     Returns:
         X_proc: standardized continuous || one-hot categorical (concatenated)
     """
-    # Missing-drop
+    # 1) Missing-drop
     kept_after_missing = _to_int_list(state["kept_after_missing"])
     X1 = X[:, kept_after_missing]
 
-    # Low-variance drop (relative to X1)
+    # 2) Low-variance drop (relative to X1)
     kept_lowvar_rel = _to_int_list(state["kept_after_lowvar_rel"])
     X2 = X1[:, kept_lowvar_rel]
 
-    # Impute
+    # 3) Impute
     X2_imp = apply_imputer(X2, state["imp_cont"], state["imp_cat"])
 
-    # Duplicate-drop (relative to X2_imp)
+    # 4) Duplicate-drop (relative to X2_imp)
     kept_dups_rel = state.get("kept_after_dups_rel")
     if kept_dups_rel is None:
         kept_dups_rel = list(range(X2_imp.shape[1]))   # keep all if no dup-drop used
@@ -429,7 +460,7 @@ def transform_with_state(X: np.ndarray, state: dict):
         kept_dups_rel = _to_int_list(kept_dups_rel)
     X3 = X2_imp[:, kept_dups_rel]
 
-    # Standardize continuous (indices are relative to X3)
+    # 5) Standardize continuous (indices are relative to X3)
     cont_feats = _to_int_list(state["cont_features"])
     # normalize scaler dict keys to plain ints too (in case they were np.int64)
     std_means = {int(k): float(v) for k, v in state["std_means"].items()}
@@ -437,21 +468,22 @@ def transform_with_state(X: np.ndarray, state: dict):
 
     X3_scaled = apply_standardizer(X3, cont_feats, std_means, std_stds)
 
-    # One-hot categorical (relative to X3)
+    # 6) Target encoding categorical (relative to X3)
     cat_feats = [int(j) for j in state["cat_features"]]
 
     # normalize specs keys to int (paranoia + robustness)
-    specs = {int(k): v for k, v in state["onehot_specs"].items()}
+    specs = {int(k): v for k, v in state["target_encoding_specs"].items()}
 
     # assert mapping consistency; if any cat index is missing, drop it with a warning
     missing = [j for j in cat_feats if j not in specs]
     if missing:
-        print(f"[warn] onehot specs missing for categorical indices {missing}; skipping those columns")
+        # You can print or log; here we prune them to avoid a hard crash
+        print(f"[warn] target encoding specs missing for categorical indices {missing}; skipping those columns")
         cat_feats = [j for j in cat_feats if j in specs]
         
-    X_cat = transform_one_hot(X3_scaled, cat_feats, state["onehot_specs"])
+    X_cat = transform_target_encoding(X3_scaled, cat_feats, state["target_encoding_specs"])
 
-    # Concatenate: continuous (scaled) + categorical (one-hot)
+    # 7) Concatenate: continuous (scaled) + categorical (target-encoded)
     if len(cont_feats) > 0:
         X_cont = X3_scaled[:, cont_feats]
     else:
@@ -470,8 +502,9 @@ def preprocess_pipeline(
     missing_threshold: float = 0.5,
     drop_low_var: bool = True,
     lowvar_threshold: float = 0.995,
-    onehot_min_count: int = 50,
-    onehot_max_categories: int = 50,
+    target_encoding_min_count: int = 50,
+    target_encoding_max_categories: int = 50,
+    target_encoding_smoothing: float = 1.0,
     drop_duplicates: bool = False,
 ):
     """
@@ -482,15 +515,16 @@ def preprocess_pipeline(
       X_train_proc, y_train, X_test_proc, state
     """
     state = fit_preprocessor(
-        X_train,
+        X_train, y_train,
         cont_features_orig=cont_features,
         missing_threshold=missing_threshold,
         drop_low_var=drop_low_var,
         lowvar_threshold=lowvar_threshold,
         cont_strategy=strategy_cont,
         cat_strategy=strategy_cat,
-        onehot_min_count=onehot_min_count,
-        onehot_max_categories=onehot_max_categories,
+        target_encoding_min_count=target_encoding_min_count,
+        target_encoding_max_categories=target_encoding_max_categories,
+        target_encoding_smoothing=target_encoding_smoothing,
         drop_duplicates=drop_duplicates,
     )
 
@@ -506,25 +540,37 @@ LEVELS = {
     "level0": dict(
         missing_threshold=0.99, drop_low_var=False,
         strategy_cont="mean", strategy_cat="mode",
-        onehot_min_count=0, onehot_max_categories=0,
+        target_encoding_min_count=0, target_encoding_max_categories=0, target_encoding_smoothing=1.0,
         drop_duplicates=False,
     ),
     "level1": dict(
-        missing_threshold=0.50, drop_low_var=True, lowvar_threshold=0.999,
+        missing_threshold=0.80, drop_low_var=True, lowvar_threshold=0.999,
         strategy_cont="mean", strategy_cat="mode",
-        onehot_min_count=0, onehot_max_categories=0,
+        target_encoding_min_count=100, target_encoding_max_categories=50, target_encoding_smoothing=1.0,
+        drop_duplicates=False,
+    ),
+    "level2_unbalanced": dict(
+        missing_threshold=0.60, drop_low_var=True, lowvar_threshold=0.995,
+        strategy_cont="mean", strategy_cat="mode",
+        target_encoding_min_count=50, target_encoding_max_categories=20, target_encoding_smoothing=1.0,
         drop_duplicates=False,
     ),
     "level2": dict(
-        missing_threshold=0.50, drop_low_var=True, lowvar_threshold=0.995,
+        missing_threshold=0.60, drop_low_var=True, lowvar_threshold=0.995,
         strategy_cont="mean", strategy_cat="mode",
-        onehot_min_count=50, onehot_max_categories=50,
+        target_encoding_min_count=50, target_encoding_max_categories=20, target_encoding_smoothing=1.0,
         drop_duplicates=False,
     ),
     "level3": dict(
         missing_threshold=0.40, drop_low_var=True, lowvar_threshold=0.990,
         strategy_cont="median", strategy_cat="mode",     # cat impute via mode
-        onehot_min_count=10, onehot_max_categories=100,
+        target_encoding_min_count=20, target_encoding_max_categories=10, target_encoding_smoothing=0.5,
+        drop_duplicates=True,                            # drop duplicate features
+    ),
+    "level4": dict(
+        missing_threshold=0.60, drop_low_var=True, lowvar_threshold=0.995,
+        strategy_cont="mean", strategy_cat="mode",     # cat impute via mode
+        target_encoding_min_count=50, target_encoding_max_categories=20, target_encoding_smoothing=0.5,
         drop_duplicates=True,                            # drop duplicate features
     ),
 }
@@ -538,15 +584,20 @@ def save_csvs_and_state(Xtr, ytr, Xte, state, outdir):
     json_state = {
         k: state[k] for k in [
             "missing_threshold","drop_low_var","lowvar_threshold","cont_strategy",
-            "onehot_min_count","onehot_max_categories","kept_after_missing",
+            "target_encoding_min_count","target_encoding_max_categories","target_encoding_smoothing","kept_after_missing",
             "kept_after_lowvar_rel","final_kept_abs","cont_features","cat_features",
             "imp_cont","imp_cat","std_means","std_stds"
         ]
     }
-    json_state["onehot_specs"] = {
-        str(k): {"values": state["onehot_specs"][k]["values"].tolist(),
-                 "other": state["onehot_specs"][k]["other"]}
-        for k in state["onehot_specs"]
+    json_state["target_encoding_specs"] = {
+        str(k): {
+            "encodings": {str(val): float(encoding) for val, encoding in v["encodings"].items()},
+            "other_encoding": float(v["other_encoding"]),
+            "global_mean": float(v["global_mean"]),
+            "kept_vals": v["kept_vals"].tolist() if hasattr(v["kept_vals"], 'tolist') else list(v["kept_vals"]),
+            "has_other": bool(v["has_other"])
+        }
+        for k, v in state["target_encoding_specs"].items()
     }
     with open(f"{outdir}/preproc_state.json", "w") as f:
         json.dump(json_state, f, indent=2)
@@ -564,8 +615,9 @@ def run_all_levels(x_train, x_test, y_train, cont_features_orig, only = None):
             missing_threshold=cfg["missing_threshold"],
             drop_low_var=cfg["drop_low_var"],
             lowvar_threshold=cfg.get("lowvar_threshold", 0.995),
-            onehot_min_count=cfg["onehot_min_count"],
-            onehot_max_categories=cfg["onehot_max_categories"],
+            target_encoding_min_count=cfg["target_encoding_min_count"],
+            target_encoding_max_categories=cfg["target_encoding_max_categories"],
+            target_encoding_smoothing=cfg["target_encoding_smoothing"],
             drop_duplicates=cfg.get("drop_duplicates", False),
         )
 
@@ -581,13 +633,13 @@ def run_all_levels(x_train, x_test, y_train, cont_features_orig, only = None):
 # ============================================================
 
 def main():
-    from helpers import load_csv_data  
+    from helpers import load_csv_data  # stdlib + numpy only
 
-    # 1) Load raw data
+    # Load raw data
     x_train, x_test, y_train, _, _ = load_csv_data("dataset")
     print(f"Raw: train {x_train.shape}, test {x_test.shape}")
 
-    # 2) Detect feature types; remove suspicious 'continuous' (dates/IDs) from continuous set
+    # Detect feature types; remove suspicious 'continuous' (dates/IDs) from continuous set
     categorical, continuous, binary = eda.detect_feature_types_refined(x_train)
     suspect_features = eda.detect_date_or_id_features(x_train[:, continuous])
 
@@ -601,7 +653,7 @@ def main():
 
     # Run all levels and export each to its own folder
     os.makedirs("preprocessed", exist_ok=True)
-    run_all_levels(x_train, x_test, y_train, cont_features_orig, only=["level3"])
+    run_all_levels(x_train, x_test, y_train, cont_features_orig, only=["level2_unbalanced"])
 
     print("\n[Done] All levels exported under ./preprocessed/")
     print("Levels:", ", ".join(LEVELS.keys()))

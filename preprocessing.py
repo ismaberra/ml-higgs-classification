@@ -228,7 +228,73 @@ def apply_standardizer(x: np.ndarray, cont_features: list, means: dict, stds: di
 # ============================================================
 # One-hot (fit/transform)
 # ============================================================
+def fit_one_hot(x: np.ndarray, cat_features: list, min_count: int = 50, max_categories: int = 50):
+    """
+    Learn one-hot specs for categorical features:
+      - Keeps up to max_categories most frequent values
+      - Groups rare categories (count < min_count) into 'OTHER' bucket
 
+    Returns:
+        specs : dict {feature_idx: {"values": np.array, "other": bool}}
+    """
+    specs = {}
+    for j in cat_features:
+        col = x[:, j]
+        vals, counts = np.unique(col, return_counts=True)
+        order = np.argsort(counts)[::-1]
+        vals, counts = vals[order], counts[order]
+
+        keep_mask = counts >= min_count
+        kept_vals = vals[keep_mask]
+        if kept_vals.size > max_categories:
+            kept_vals = kept_vals[:max_categories]
+
+        specs[j] = {
+            "values": kept_vals.astype(float),
+            "other": kept_vals.size < vals.size
+        }
+    return specs
+
+
+def transform_one_hot(x: np.ndarray, cat_features: list, specs: dict):
+    """
+    Apply one-hot encoding using fitted specs.
+    Returns:
+        X_oh : numpy array with concatenated one-hot features
+    """
+    n = x.shape[0]
+    encoded_blocks = []
+
+    for j in cat_features:
+        col = x[:, j]
+        values = specs[j]["values"]
+        other_flag = specs[j]["other"]
+        width = values.size + (1 if other_flag else 0)
+        oh = np.zeros((n, width))
+
+        # Vectorized-ish fill
+        if values.size > 0:
+            # For each kept value, set the right column
+            for k, v in enumerate(values):
+                hits = (col == v)
+                oh[hits, k] = 1.0
+        if other_flag:
+            # Any row not matching any kept value => OTHER
+            if values.size > 0:
+                any_match = np.zeros(n, dtype=bool)
+                for v in values:
+                    any_match |= (col == v)
+                oh[~any_match, -1] = 1.0
+            else:
+                # No kept values -> everything goes to OTHER
+                oh[:, -1] = 1.0
+
+        encoded_blocks.append(oh)
+
+    if encoded_blocks:
+        return np.concatenate(encoded_blocks, axis=1)
+    else:
+        return np.empty((n, 0))
 
 def fit_target_encoding(
     x: np.ndarray,
@@ -569,6 +635,124 @@ def preprocess_pipeline(
     Xte = transform_with_state(X_test, state)
     return Xtr, y_train, Xte, state
 
+def preprocess_level5_simple_1(X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray):
+    """
+    Level 5 simple_1 pipeline (minimal changes from level2):
+      1) Drop features with > 50% missing values (like level2)
+      2) NO meta feature removal
+      3) NO survey code cleaning
+      4) NO outlier removal
+      5) Identify categories (standard thresholds)
+      6) Force-add given indices to continuous
+      7) Impute missing values (like level2):
+         - categorical: mode
+         - continuous: mean
+         - binary: mean
+         - pseudo_binary: 0
+      8) One-hot encode categorical (like level2: min_count=50, max_categories=50)
+      9) Standardize continuous
+      10) Oversample positives to 35% (like level2)
+    """
+    # 1) Drop features with > 50% missing (like level2)
+    Xtr, kept1, _ = drop_missing_features(X_train, threshold=0.50)
+    Xte = X_test[:, kept1]
+
+    # Compose absolute kept indices (no meta drop)
+    final_kept_abs = kept1
+
+    # 2-4) Skip meta removal, survey cleaning, and outlier removal
+
+    # 5) Identify feature types (standard)
+    categorical, continuous, binary, pseudo_binary = eda.detect_feature_types_refined(Xtr)
+
+    # 6) Force-add indices to continuous
+    force_cont_abs = [63, 64, 146, 251, 252, 253, 254, 288, 289]
+    abs_to_rel = {abs_j: rel_j for rel_j, abs_j in enumerate(final_kept_abs)}
+    force_cont = [abs_to_rel[abs_j] for abs_j in force_cont_abs if abs_j in abs_to_rel]
+
+    cont_set = set(continuous)
+    cat_set = set(categorical)
+    bin_set = set(binary)
+    pbin_set = set(pseudo_binary)
+    for idx in force_cont:
+        cont_set.add(idx)
+        cat_set.discard(idx)
+        bin_set.discard(idx)
+        pbin_set.discard(idx)
+    continuous = sorted(list(cont_set))
+    categorical = sorted(list(cat_set))
+    binary = sorted(list(bin_set))
+    pseudo_binary = sorted(list(pbin_set))
+
+    # 7) Impute missing values (like level2)
+    # 7a) Continuous: mean (like level2)
+    imp_cont, _ = fit_imputer(Xtr, continuous, strategy_cont="mean", strategy_cat="mode")
+    Xtr_imp = apply_imputer(Xtr, imp_cont, {})
+    Xte_imp = apply_imputer(Xte, imp_cont, {})
+
+    # 7b) Binary: mean (like level2)
+    for j in binary:
+        col = Xtr_imp[:, j]
+        m = np.nanmean(col) if np.any(np.isnan(col)) else np.mean(col)
+        Xtr_imp[np.isnan(Xtr_imp[:, j]), j] = m
+        Xte_imp[np.isnan(Xte_imp[:, j]), j] = m
+
+    # 7c) Pseudo-binary: 0
+    for j in pseudo_binary:
+        Xtr_imp[np.isnan(Xtr_imp[:, j]), j] = 0.0
+        Xte_imp[np.isnan(Xte_imp[:, j]), j] = 0.0
+
+    # 7d) Categorical: mode (like level2)
+    imp_cat = {}
+    for j in categorical:
+        col = Xtr[:, j]
+        vals, counts = np.unique(col[~np.isnan(col)], return_counts=True)
+        imp_cat[j] = float(vals[np.argmax(counts)]) if vals.size > 0 else 0.0
+        Xtr_imp[np.isnan(Xtr_imp[:, j]), j] = imp_cat[j]
+        Xte_imp[np.isnan(Xte_imp[:, j]), j] = imp_cat[j]
+
+    # 8) One-hot encoding (like level2)
+    specs = fit_one_hot(Xtr_imp, categorical, min_count=50, max_categories=50)
+    Xtr_cat = transform_one_hot(Xtr_imp, categorical, specs)
+    Xte_cat = transform_one_hot(Xte_imp, categorical, specs)
+
+    # 9) Standardize continuous
+    means, stds = fit_standardizer(Xtr_imp, continuous)
+    Xtr_scaled = apply_standardizer(Xtr_imp, continuous, means, stds)
+    Xte_scaled = apply_standardizer(Xte_imp, continuous, means, stds)
+
+    # Build final matrices
+    Xtr_cont = Xtr_scaled[:, continuous] if len(continuous) > 0 else np.empty((Xtr_scaled.shape[0], 0))
+    Xte_cont = Xte_scaled[:, continuous] if len(continuous) > 0 else np.empty((Xte_scaled.shape[0], 0))
+    Xtr_final = Xtr_cont if Xtr_cat.size == 0 else np.concatenate([Xtr_cont, Xtr_cat], axis=1)
+    Xte_final = Xte_cont if Xte_cat.size == 0 else np.concatenate([Xte_cont, Xte_cat], axis=1)
+
+    # Create a minimal state for consistency with other levels
+    state = {
+        "missing_threshold": 0.50,
+        "drop_low_var": False,
+        "lowvar_threshold": 0.995,
+        "cont_strategy": "mean",
+        "cat_strategy": "mode",
+        "target_encoding_min_count": 50,
+        "target_encoding_max_categories": 50,
+        "target_encoding_smoothing": 1.0,
+        "kept_after_missing": final_kept_abs,
+        "kept_after_lowvar_rel": list(range(len(final_kept_abs))),
+        "final_kept_abs": final_kept_abs,
+        "cont_features": continuous,
+        "cat_features": categorical,
+        "imp_cont": imp_cont,
+        "imp_cat": imp_cat,
+        "std_means": means,
+        "std_stds": stds,
+        "onehot_specs": specs,
+        "final_dim_before_oh": len(final_kept_abs),
+    }
+    
+    # 10) Oversample positives to 35% (like level2)
+    Xtr_bal, ytr_bal = oversample_minority(Xtr_final, y_train, target_pos_ratio=0.35)
+    return Xtr_bal, ytr_bal, Xte_final, state
 
 # ============================================================
 # RUN ALL LEVELS OF PREPRO
@@ -639,6 +823,9 @@ LEVELS = {
         target_encoding_smoothing=0.5,
         drop_duplicates=True,  # drop duplicate features
     ),
+    "level5": dict(
+        tag="level5_simple_1",
+    ),
 }
 
 
@@ -668,22 +855,36 @@ def save_csvs_and_state(Xtr, ytr, Xte, state, outdir):
             "std_stds",
         ]
     }
-    json_state["target_encoding_specs"] = {
-        str(k): {
-            "encodings": {
-                str(val): float(encoding) for val, encoding in v["encodings"].items()
-            },
-            "other_encoding": float(v["other_encoding"]),
-            "global_mean": float(v["global_mean"]),
-            "kept_vals": (
-                v["kept_vals"].tolist()
-                if hasattr(v["kept_vals"], "tolist")
-                else list(v["kept_vals"])
-            ),
-            "has_other": bool(v["has_other"]),
+    
+    # Handle target encoding specs (for target encoding approach)
+    if "target_encoding_specs" in state:
+        json_state["target_encoding_specs"] = {
+            str(k): {
+                "encodings": {
+                    str(val): float(encoding) for val, encoding in v["encodings"].items()
+                },
+                "other_encoding": float(v["other_encoding"]),
+                "global_mean": float(v["global_mean"]),
+                "kept_vals": (
+                    v["kept_vals"].tolist()
+                    if hasattr(v["kept_vals"], "tolist")
+                    else list(v["kept_vals"])
+                ),
+                "has_other": bool(v["has_other"]),
+            }
+            for k, v in state["target_encoding_specs"].items()
         }
-        for k, v in state["target_encoding_specs"].items()
-    }
+    
+    # Handle onehot specs (for one-hot encoding approach)
+    if "onehot_specs" in state:
+        json_state["onehot_specs"] = {
+            str(k): {
+                "values": state["onehot_specs"][k]["values"].tolist(),
+                "other": state["onehot_specs"][k]["other"]
+            }
+            for k in state["onehot_specs"]
+        }
+    
     with open(f"{outdir}/preproc_state.json", "w") as f:
         json.dump(json_state, f, indent=2)
 
@@ -693,23 +894,26 @@ def run_all_levels(x_train, x_test, y_train, cont_features_orig, only=None):
     levels = LEVELS if only is None else {k: LEVELS[k] for k in only}
     # Run preprocessing pipelines for all levels
     for name, cfg in levels.items():
-        Xtr, ytr, Xte, state = preprocess_pipeline(
-            x_train,
-            y_train,
-            x_test,
-            cont_features=cont_features_orig,
-            strategy_cont=cfg["strategy_cont"],
-            strategy_cat=cfg.get("strategy_cat", "mode"),
-            missing_threshold=cfg["missing_threshold"],
-            drop_low_var=cfg["drop_low_var"],
-            lowvar_threshold=cfg.get("lowvar_threshold", 0.995),
-            target_encoding_min_count=cfg["target_encoding_min_count"],
-            target_encoding_max_categories=cfg["target_encoding_max_categories"],
-            target_encoding_smoothing=cfg["target_encoding_smoothing"],
-            drop_duplicates=cfg.get("drop_duplicates", False),
-        )
+        if name in ["level5"]:
+            Xtr, ytr, Xte, state = preprocess_level5_simple_1(x_train, y_train, x_test)
+        else :            
+            Xtr, ytr, Xte, state = preprocess_pipeline(
+                x_train,
+                y_train,
+                x_test,
+                cont_features=cont_features_orig,
+                strategy_cont=cfg["strategy_cont"],
+                strategy_cat=cfg.get("strategy_cat", "mode"),
+                missing_threshold=cfg["missing_threshold"],
+                drop_low_var=cfg["drop_low_var"],
+                lowvar_threshold=cfg.get("lowvar_threshold", 0.995),
+                target_encoding_min_count=cfg["target_encoding_min_count"],
+                target_encoding_max_categories=cfg["target_encoding_max_categories"],
+                target_encoding_smoothing=cfg["target_encoding_smoothing"],
+                drop_duplicates=cfg.get("drop_duplicates", False),
+            )
 
-        # OVERSAMPLING for balancing
+        # OVERSAMPLING for balancing (level5_simple_1 already does this internally)
         if name in ["level2", "level3", "level4"]:
             print(f"  -> Oversampling positives to reach 35% ratio...")
             Xtr, ytr = oversample_minority(Xtr, ytr, target_pos_ratio=0.35)
@@ -731,7 +935,7 @@ def main():
     print(f"Raw: train {x_train.shape}, test {x_test.shape}")
 
     # Detect feature types; remove suspicious 'continuous' (dates/IDs) from continuous set
-    categorical, continuous, binary = eda.detect_feature_types_refined(x_train)
+    _, continuous, _ , _ = eda.detect_feature_types_refined(x_train)
     suspect_features = eda.detect_date_or_id_features(x_train[:, continuous])
 
     removed_from_continuous = []
@@ -745,7 +949,7 @@ def main():
     # Run all levels and export each to its own folder
     os.makedirs("preprocessed", exist_ok=True)
     run_all_levels(
-        x_train, x_test, y_train, cont_features_orig, only=["level2"]
+        x_train, x_test, y_train, cont_features_orig, only=["level5"]
     )
 
     print("\n[Done] All levels exported under ./preprocessed/")

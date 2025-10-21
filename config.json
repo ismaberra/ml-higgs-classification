@@ -1,5 +1,5 @@
 {
-  "data_dir": "/preprocessed/level2",
+  "data_dir": "/preprocessed/level5",
   "use_preprocessed": false,
 
   "model": "reg_logistic",
@@ -13,7 +13,7 @@
   "threshold": 0.5,
 
   "results_dir": "results",
-  "tag": "regularized_logistic_level2",
+  "tag": "regularized_logistic_level5",
   "make_submission": true,
   "raw_dataset_dir": "/dataset",
   "n_jobs": 3,

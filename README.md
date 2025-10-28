@@ -134,24 +134,6 @@ Tips for Apple Silicon (M1/M2):
 - Set `n_jobs` + `cv_n_jobs` conservatively to avoid oversubscription (e.g., `n_jobs=3`, `cv_n_jobs=2` on 8-core CPUs)
 
 
-## Thresholding and Metrics
-
-- For imbalanced data, we use PR AUC for selection during grid search.
-- We fix the classification threshold to 0.45, leveraging domain knowledge and avoiding leakage from re-optimizing it on training data after target encoding.
-
-
-## Reproducibility
-
-- Set `seed` in `config.json` or via CLI.
-- Folds are stratified by label.
-
-
-## Troubleshooting
-
-- If the process appears “stuck” during grid search: ensure `n_jobs` and `cv_n_jobs` are set, and confirm functions used in parallel are top-level (already handled in `run.py`).
-- If predictions seem to use threshold 0.5: verify `threshold` in `config.json`. `run.py` now merges config values early so they are respected throughout CV and submission.
-
-
 ## Repository Structure
 
 - `preprocessing.py`: defines levels, fits state, and writes preprocessed matrices

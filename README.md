@@ -1,6 +1,6 @@
 ## My Contribution
 
-This project was completed as part of **CS-433 Machine Learning** at EPFL (double diploma EPFL–ETH Zurich).
+This project was completed as part of **Machine Learning** at EPFL.
 
 I was involved in all major components of the project:
 

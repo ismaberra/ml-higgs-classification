@@ -4,11 +4,10 @@ This project was completed as part of **Machine Learning** at EPFL.
 
 I was involved in all major components of the project:
 
-- **Data preprocessing pipeline**: Designed and implemented a multi-level preprocessing system with configurable missing-value imputation, low-variance feature removal, target encoding, and duplicate handling — producing 5 distinct preprocessing levels for ablation study.
+- **Data preprocessing pipeline**: Designed and implemented a multi-level preprocessing system with configurable missing-value imputation, low-variance feature removal, target encoding, and duplicate handling, producing 5 distinct preprocessing levels for ablation study.
 - **ML algorithm implementations**: Implemented logistic regression, regularized logistic regression, class-weighted variants, and a random forest from scratch in NumPy (implementations.py and new_implementations.py).
 - **Training & evaluation framework**: Built the full training pipeline in run.py including k-fold cross-validation, grid search over hyperparameters (gamma, lambda, max_iters, threshold), and parallel execution via ProcessPoolExecutor.
 - **Configuration system**: Designed the JSON-based configuration system (config.json) enabling reproducible, configurable runs without code changes.
-- **Submission pipeline**: Generated the best Kaggle submission using regularized logistic regression on level-5 preprocessed data.
 
 ---
 
